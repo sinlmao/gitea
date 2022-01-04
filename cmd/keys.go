@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/modules/private"
 
 	"github.com/urfave/cli"
 )
@@ -62,14 +62,15 @@ func runKeys(c *cli.Context) error {
 		return errors.New("No key type and content provided")
 	}
 
-	if err := initDBDisableConsole(true); err != nil {
-		return err
-	}
+	ctx, cancel := installSignals()
+	defer cancel()
 
-	publicKey, err := models.SearchPublicKeyByContent(content)
+	setup("keys.log", false)
+
+	authorizedString, err := private.AuthorizedPublicKeyByContent(ctx, content)
 	if err != nil {
 		return err
 	}
-	fmt.Println(publicKey.AuthorizedString())
+	fmt.Println(strings.TrimSpace(authorizedString))
 	return nil
 }

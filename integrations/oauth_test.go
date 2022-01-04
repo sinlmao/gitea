@@ -5,9 +5,11 @@
 package integrations
 
 import (
-	"encoding/json"
+	"bytes"
+	"io"
 	"testing"
 
+	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/setting"
 
 	"github.com/stretchr/testify/assert"
@@ -16,20 +18,20 @@ import (
 const defaultAuthorize = "/login/oauth/authorize?client_id=da7da3ba-9a13-4167-856f-3899de0b0138&redirect_uri=a&response_type=code&state=thestate"
 
 func TestNoClientID(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "GET", "/login/oauth/authorize")
 	ctx := loginUser(t, "user2")
 	ctx.MakeRequest(t, req, 400)
 }
 
 func TestLoginRedirect(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "GET", "/login/oauth/authorize")
 	assert.Contains(t, MakeRequest(t, req, 302).Body.String(), "/user/login")
 }
 
 func TestShowAuthorize(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "GET", defaultAuthorize)
 	ctx := loginUser(t, "user4")
 	resp := ctx.MakeRequest(t, req, 200)
@@ -40,7 +42,7 @@ func TestShowAuthorize(t *testing.T) {
 }
 
 func TestRedirectWithExistingGrant(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "GET", defaultAuthorize)
 	ctx := loginUser(t, "user1")
 	resp := ctx.MakeRequest(t, req, 302)
@@ -51,7 +53,7 @@ func TestRedirectWithExistingGrant(t *testing.T) {
 }
 
 func TestAccessTokenExchange(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequestWithValues(t, "POST", "/login/oauth/access_token", map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     "da7da3ba-9a13-4167-856f-3899de0b0138",
@@ -68,13 +70,14 @@ func TestAccessTokenExchange(t *testing.T) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	parsed := new(response)
+
 	assert.NoError(t, json.Unmarshal(resp.Body.Bytes(), parsed))
 	assert.True(t, len(parsed.AccessToken) > 10)
 	assert.True(t, len(parsed.RefreshToken) > 10)
 }
 
 func TestAccessTokenExchangeWithoutPKCE(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequestWithJSON(t, "POST", "/login/oauth/access_token", map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     "da7da3ba-9a13-4167-856f-3899de0b0138",
@@ -91,13 +94,14 @@ func TestAccessTokenExchangeWithoutPKCE(t *testing.T) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	parsed := new(response)
+
 	assert.NoError(t, json.Unmarshal(resp.Body.Bytes(), parsed))
 	assert.True(t, len(parsed.AccessToken) > 10)
 	assert.True(t, len(parsed.RefreshToken) > 10)
 }
 
 func TestAccessTokenExchangeJSON(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequestWithJSON(t, "POST", "/login/oauth/access_token", map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     "da7da3ba-9a13-4167-856f-3899de0b0138",
@@ -109,7 +113,7 @@ func TestAccessTokenExchangeJSON(t *testing.T) {
 }
 
 func TestAccessTokenExchangeWithInvalidCredentials(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	// invalid client id
 	req := NewRequestWithValues(t, "POST", "/login/oauth/access_token", map[string]string{
 		"grant_type":    "authorization_code",
@@ -163,7 +167,7 @@ func TestAccessTokenExchangeWithInvalidCredentials(t *testing.T) {
 }
 
 func TestAccessTokenExchangeWithBasicAuth(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequestWithValues(t, "POST", "/login/oauth/access_token", map[string]string{
 		"grant_type":    "authorization_code",
 		"redirect_uri":  "a",
@@ -179,6 +183,7 @@ func TestAccessTokenExchangeWithBasicAuth(t *testing.T) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	parsed := new(response)
+
 	assert.NoError(t, json.Unmarshal(resp.Body.Bytes(), parsed))
 	assert.True(t, len(parsed.AccessToken) > 10)
 	assert.True(t, len(parsed.RefreshToken) > 10)
@@ -204,7 +209,7 @@ func TestAccessTokenExchangeWithBasicAuth(t *testing.T) {
 }
 
 func TestRefreshTokenInvalidation(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequestWithValues(t, "POST", "/login/oauth/access_token", map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     "da7da3ba-9a13-4167-856f-3899de0b0138",
@@ -221,6 +226,7 @@ func TestRefreshTokenInvalidation(t *testing.T) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	parsed := new(response)
+
 	assert.NoError(t, json.Unmarshal(resp.Body.Bytes(), parsed))
 
 	// test without invalidation
@@ -233,11 +239,21 @@ func TestRefreshTokenInvalidation(t *testing.T) {
 		"redirect_uri":  "a",
 		"refresh_token": parsed.RefreshToken,
 	})
+
+	bs, err := io.ReadAll(refreshReq.Body)
+	assert.NoError(t, err)
+
+	refreshReq.Body = io.NopCloser(bytes.NewReader(bs))
 	MakeRequest(t, refreshReq, 200)
+
+	refreshReq.Body = io.NopCloser(bytes.NewReader(bs))
 	MakeRequest(t, refreshReq, 200)
 
 	// test with invalidation
 	setting.OAuth2.InvalidateRefreshTokens = true
+	refreshReq.Body = io.NopCloser(bytes.NewReader(bs))
 	MakeRequest(t, refreshReq, 200)
+
+	refreshReq.Body = io.NopCloser(bytes.NewReader(bs))
 	MakeRequest(t, refreshReq, 400)
 }

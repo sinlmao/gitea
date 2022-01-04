@@ -6,7 +6,7 @@ package git
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"path/filepath"
 	"testing"
 
@@ -17,6 +17,7 @@ func TestRepository_GetBlob_Found(t *testing.T) {
 	repoPath := filepath.Join(testReposDir, "repo1_bare")
 	r, err := OpenRepository(repoPath)
 	assert.NoError(t, err)
+	defer r.Close()
 
 	testCases := []struct {
 		OID  string
@@ -32,9 +33,9 @@ func TestRepository_GetBlob_Found(t *testing.T) {
 
 		dataReader, err := blob.DataAsync()
 		assert.NoError(t, err)
-		defer dataReader.Close()
 
-		data, err := ioutil.ReadAll(dataReader)
+		data, err := io.ReadAll(dataReader)
+		assert.NoError(t, dataReader.Close())
 		assert.NoError(t, err)
 		assert.Equal(t, testCase.Data, data)
 	}
@@ -44,6 +45,7 @@ func TestRepository_GetBlob_NotExist(t *testing.T) {
 	repoPath := filepath.Join(testReposDir, "repo1_bare")
 	r, err := OpenRepository(repoPath)
 	assert.NoError(t, err)
+	defer r.Close()
 
 	testCase := "0000000000000000000000000000000000000000"
 	testError := ErrNotExist{testCase, ""}
@@ -57,6 +59,7 @@ func TestRepository_GetBlob_NoId(t *testing.T) {
 	repoPath := filepath.Join(testReposDir, "repo1_bare")
 	r, err := OpenRepository(repoPath)
 	assert.NoError(t, err)
+	defer r.Close()
 
 	testCase := ""
 	testError := fmt.Errorf("Length must be 40: %s", testCase)

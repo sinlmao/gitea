@@ -6,154 +6,188 @@
 package markdown
 
 import (
-	"bytes"
+	"fmt"
+	"io"
 	"strings"
+	"sync"
 
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/markup"
+	"code.gitea.io/gitea/modules/markup/common"
 	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/modules/util"
+	giteautil "code.gitea.io/gitea/modules/util"
 
-	"github.com/russross/blackfriday"
+	chromahtml "github.com/alecthomas/chroma/formatters/html"
+	"github.com/yuin/goldmark"
+	highlighting "github.com/yuin/goldmark-highlighting"
+	meta "github.com/yuin/goldmark-meta"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer"
+	"github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/util"
 )
 
-// Renderer is a extended version of underlying render object.
-type Renderer struct {
-	blackfriday.Renderer
-	URLPrefix string
-	IsWiki    bool
+var converter goldmark.Markdown
+var once = sync.Once{}
+
+var urlPrefixKey = parser.NewContextKey()
+var isWikiKey = parser.NewContextKey()
+var renderMetasKey = parser.NewContextKey()
+
+type limitWriter struct {
+	w     io.Writer
+	sum   int64
+	limit int64
 }
 
-var byteMailto = []byte("mailto:")
-
-// Link defines how formal links should be processed to produce corresponding HTML elements.
-func (r *Renderer) Link(out *bytes.Buffer, link []byte, title []byte, content []byte) {
-	// special case: this is not a link, a hash link or a mailto:, so it's a
-	// relative URL
-	if len(link) > 0 && !markup.IsLink(link) &&
-		link[0] != '#' && !bytes.HasPrefix(link, byteMailto) {
-		lnk := string(link)
-		if r.IsWiki {
-			lnk = util.URLJoin("wiki", lnk)
+// Write implements the standard Write interface:
+func (l *limitWriter) Write(data []byte) (int, error) {
+	leftToWrite := l.limit - l.sum
+	if leftToWrite < int64(len(data)) {
+		n, err := l.w.Write(data[:leftToWrite])
+		l.sum += int64(n)
+		if err != nil {
+			return n, err
 		}
-		mLink := util.URLJoin(r.URLPrefix, lnk)
-		link = []byte(mLink)
+		return n, fmt.Errorf("Rendered content too large - truncating render")
 	}
-
-	if len(content) > 10 && string(content[0:9]) == "<a href=\"" && bytes.Contains(content[9:], []byte("<img")) {
-		// Image with link case: markdown `[![]()]()`
-		// If the content is an image, then we change the original href around it
-		// which points to itself to a new address "link"
-		rightQuote := bytes.Index(content[9:], []byte("\""))
-		content = bytes.Replace(content, content[9:9+rightQuote], link, 1)
-		out.Write(content)
-	} else {
-		r.Renderer.Link(out, link, title, content)
-	}
+	n, err := l.w.Write(data)
+	l.sum += int64(n)
+	return n, err
 }
 
-// List renders markdown bullet or digit lists to HTML
-func (r *Renderer) List(out *bytes.Buffer, text func() bool, flags int) {
-	marker := out.Len()
-	if out.Len() > 0 {
-		out.WriteByte('\n')
-	}
-
-	if flags&blackfriday.LIST_TYPE_DEFINITION != 0 {
-		out.WriteString("<dl>")
-	} else if flags&blackfriday.LIST_TYPE_ORDERED != 0 {
-		out.WriteString("<ol class='ui list'>")
-	} else {
-		out.WriteString("<ul class='ui list'>")
-	}
-	if !text() {
-		out.Truncate(marker)
-		return
-	}
-	if flags&blackfriday.LIST_TYPE_DEFINITION != 0 {
-		out.WriteString("</dl>\n")
-	} else if flags&blackfriday.LIST_TYPE_ORDERED != 0 {
-		out.WriteString("</ol>\n")
-	} else {
-		out.WriteString("</ul>\n")
-	}
+// newParserContext creates a parser.Context with the render context set
+func newParserContext(ctx *markup.RenderContext) parser.Context {
+	pc := parser.NewContext(parser.WithIDs(newPrefixedIDs()))
+	pc.Set(urlPrefixKey, ctx.URLPrefix)
+	pc.Set(isWikiKey, ctx.IsWiki)
+	pc.Set(renderMetasKey, ctx.Metas)
+	return pc
 }
 
-// ListItem defines how list items should be processed to produce corresponding HTML elements.
-func (r *Renderer) ListItem(out *bytes.Buffer, text []byte, flags int) {
-	// Detect procedures to draw checkboxes.
-	prefix := ""
-	if bytes.HasPrefix(text, []byte("<p>")) {
-		prefix = "<p>"
+// actualRender renders Markdown to HTML without handling special links.
+func actualRender(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	once.Do(func() {
+		converter = goldmark.New(
+			goldmark.WithExtensions(
+				extension.NewTable(
+					extension.WithTableCellAlignMethod(extension.TableCellAlignAttribute)),
+				extension.Strikethrough,
+				extension.TaskList,
+				extension.DefinitionList,
+				common.FootnoteExtension,
+				highlighting.NewHighlighting(
+					highlighting.WithFormatOptions(
+						chromahtml.WithClasses(true),
+						chromahtml.PreventSurroundingPre(true),
+					),
+					highlighting.WithWrapperRenderer(func(w util.BufWriter, c highlighting.CodeBlockContext, entering bool) {
+						if entering {
+							language, _ := c.Language()
+							if language == nil {
+								language = []byte("text")
+							}
+
+							languageStr := string(language)
+
+							preClasses := []string{"code-block"}
+							if languageStr == "mermaid" {
+								preClasses = append(preClasses, "is-loading")
+							}
+
+							_, err := w.WriteString(`<pre class="` + strings.Join(preClasses, " ") + `">`)
+							if err != nil {
+								return
+							}
+
+							// include language-x class as part of commonmark spec
+							_, err = w.WriteString(`<code class="chroma language-` + string(language) + `">`)
+							if err != nil {
+								return
+							}
+						} else {
+							_, err := w.WriteString("</code></pre>")
+							if err != nil {
+								return
+							}
+						}
+					}),
+				),
+				meta.Meta,
+			),
+			goldmark.WithParserOptions(
+				parser.WithAttribute(),
+				parser.WithAutoHeadingID(),
+				parser.WithASTTransformers(
+					util.Prioritized(&ASTTransformer{}, 10000),
+				),
+			),
+			goldmark.WithRendererOptions(
+				html.WithUnsafe(),
+			),
+		)
+
+		// Override the original Tasklist renderer!
+		converter.Renderer().AddOptions(
+			renderer.WithNodeRenderers(
+				util.Prioritized(NewHTMLRenderer(), 10),
+			),
+		)
+
+	})
+
+	lw := &limitWriter{
+		w:     output,
+		limit: setting.UI.MaxDisplayFileSize * 3,
 	}
-	switch {
-	case bytes.HasPrefix(text, []byte(prefix+"[ ] ")):
-		text = append([]byte(`<span class="ui fitted disabled checkbox"><input type="checkbox" disabled="disabled" /><label /></span>`), text[3+len(prefix):]...)
-		if prefix != "" {
-			text = bytes.Replace(text, []byte(prefix), []byte{}, 1)
+
+	// FIXME: should we include a timeout to abort the renderer if it takes too long?
+	defer func() {
+		err := recover()
+		if err == nil {
+			return
 		}
-	case bytes.HasPrefix(text, []byte(prefix+"[x] ")):
-		text = append([]byte(`<span class="ui checked fitted disabled checkbox"><input type="checkbox" checked="" disabled="disabled" /><label /></span>`), text[3+len(prefix):]...)
-		if prefix != "" {
-			text = bytes.Replace(text, []byte(prefix), []byte{}, 1)
+
+		log.Warn("Unable to render markdown due to panic in goldmark: %v", err)
+		if log.IsDebug() {
+			log.Debug("Panic in markdown: %v\n%s", err, string(log.Stack(2)))
 		}
+	}()
+
+	// FIXME: Don't read all to memory, but goldmark doesn't support
+	pc := newParserContext(ctx)
+	buf, err := io.ReadAll(input)
+	if err != nil {
+		log.Error("Unable to ReadAll: %v", err)
+		return err
 	}
-	r.Renderer.ListItem(out, text, flags)
+	if err := converter.Convert(giteautil.NormalizeEOL(buf), lw, parser.WithContext(pc)); err != nil {
+		log.Error("Unable to render: %v", err)
+		return err
+	}
+
+	return nil
 }
 
-// Image defines how images should be processed to produce corresponding HTML elements.
-func (r *Renderer) Image(out *bytes.Buffer, link []byte, title []byte, alt []byte) {
-	prefix := r.URLPrefix
-	if r.IsWiki {
-		prefix = util.URLJoin(prefix, "wiki", "raw")
-	}
-	prefix = strings.Replace(prefix, "/src/", "/media/", 1)
-	if len(link) > 0 && !markup.IsLink(link) {
-		lnk := string(link)
-		lnk = util.URLJoin(prefix, lnk)
-		lnk = strings.Replace(lnk, " ", "+", -1)
-		link = []byte(lnk)
-	}
+// Note: The output of this method must get sanitized.
+func render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	defer func() {
+		err := recover()
+		if err == nil {
+			return
+		}
 
-	// Put a link around it pointing to itself by default
-	out.WriteString(`<a href="`)
-	out.Write(link)
-	out.WriteString(`">`)
-	r.Renderer.Image(out, link, title, alt)
-	out.WriteString("</a>")
-}
-
-const (
-	blackfridayExtensions = 0 |
-		blackfriday.EXTENSION_NO_INTRA_EMPHASIS |
-		blackfriday.EXTENSION_TABLES |
-		blackfriday.EXTENSION_FENCED_CODE |
-		blackfriday.EXTENSION_STRIKETHROUGH |
-		blackfriday.EXTENSION_NO_EMPTY_LINE_BEFORE_BLOCK |
-		blackfriday.EXTENSION_DEFINITION_LISTS |
-		blackfriday.EXTENSION_FOOTNOTES |
-		blackfriday.EXTENSION_HEADER_IDS |
-		blackfriday.EXTENSION_AUTO_HEADER_IDS
-	blackfridayHTMLFlags = 0 |
-		blackfriday.HTML_SKIP_STYLE |
-		blackfriday.HTML_OMIT_CONTENTS |
-		blackfriday.HTML_USE_SMARTYPANTS
-)
-
-// RenderRaw renders Markdown to HTML without handling special links.
-func RenderRaw(body []byte, urlPrefix string, wikiMarkdown bool) []byte {
-	renderer := &Renderer{
-		Renderer:  blackfriday.HtmlRenderer(blackfridayHTMLFlags, "", ""),
-		URLPrefix: urlPrefix,
-		IsWiki:    wikiMarkdown,
-	}
-
-	exts := blackfridayExtensions
-	if setting.Markdown.EnableHardLineBreak {
-		exts |= blackfriday.EXTENSION_HARD_LINE_BREAK
-	}
-
-	body = blackfriday.Markdown(body, renderer, exts)
-	return markup.SanitizeBytes(body)
+		log.Warn("Unable to render markdown due to panic in goldmark - will return raw bytes")
+		if log.IsDebug() {
+			log.Debug("Panic in markdown: %v\n%s", err, string(log.Stack(2)))
+		}
+		_, err = io.Copy(output, input)
+		if err != nil {
+			log.Error("io.Copy failed: %v", err)
+		}
+	}()
+	return actualRender(ctx, input, output)
 }
 
 var (
@@ -162,41 +196,78 @@ var (
 )
 
 func init() {
-	markup.RegisterParser(Parser{})
+	markup.RegisterRenderer(Renderer{})
 }
 
-// Parser implements markup.Parser
-type Parser struct {
-}
+// Renderer implements markup.Renderer
+type Renderer struct{}
 
-// Name implements markup.Parser
-func (Parser) Name() string {
+// Name implements markup.Renderer
+func (Renderer) Name() string {
 	return MarkupName
 }
 
-// Extensions implements markup.Parser
-func (Parser) Extensions() []string {
+// NeedPostProcess implements markup.Renderer
+func (Renderer) NeedPostProcess() bool { return true }
+
+// Extensions implements markup.Renderer
+func (Renderer) Extensions() []string {
 	return setting.Markdown.FileExtensions
 }
 
-// Render implements markup.Parser
-func (Parser) Render(rawBytes []byte, urlPrefix string, metas map[string]string, isWiki bool) []byte {
-	return RenderRaw(rawBytes, urlPrefix, isWiki)
+// SanitizerRules implements markup.Renderer
+func (Renderer) SanitizerRules() []setting.MarkupSanitizerRule {
+	return []setting.MarkupSanitizerRule{}
+}
+
+// Render implements markup.Renderer
+func (Renderer) Render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	return render(ctx, input, output)
 }
 
 // Render renders Markdown to HTML with all specific handling stuff.
-func Render(rawBytes []byte, urlPrefix string, metas map[string]string) []byte {
-	return markup.Render("a.md", rawBytes, urlPrefix, metas)
+func Render(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	if ctx.Type == "" {
+		ctx.Type = MarkupName
+	}
+	return markup.Render(ctx, input, output)
 }
 
-// RenderString renders Markdown to HTML with special links and returns string type.
-func RenderString(raw, urlPrefix string, metas map[string]string) string {
-	return markup.RenderString("a.md", raw, urlPrefix, metas)
+// RenderString renders Markdown string to HTML with all specific handling stuff and return string
+func RenderString(ctx *markup.RenderContext, content string) (string, error) {
+	var buf strings.Builder
+	if err := Render(ctx, strings.NewReader(content), &buf); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
-// RenderWiki renders markdown wiki page to HTML and return HTML string
-func RenderWiki(rawBytes []byte, urlPrefix string, metas map[string]string) string {
-	return markup.RenderWiki("a.md", rawBytes, urlPrefix, metas)
+// RenderRaw renders Markdown to HTML without handling special links.
+func RenderRaw(ctx *markup.RenderContext, input io.Reader, output io.Writer) error {
+	rd, wr := io.Pipe()
+	defer func() {
+		_ = rd.Close()
+		_ = wr.Close()
+	}()
+
+	go func() {
+		if err := render(ctx, input, wr); err != nil {
+			_ = wr.CloseWithError(err)
+			return
+		}
+		_ = wr.Close()
+	}()
+
+	return markup.SanitizeReader(rd, "", output)
+}
+
+// RenderRawString renders Markdown to HTML without handling special links and return string
+func RenderRawString(ctx *markup.RenderContext, content string) (string, error) {
+	var buf strings.Builder
+	if err := RenderRaw(ctx, strings.NewReader(content), &buf); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // IsMarkdownFile reports whether name looks like a Markdown file

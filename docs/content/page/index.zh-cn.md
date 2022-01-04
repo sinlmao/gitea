@@ -4,7 +4,7 @@ title: "文档"
 slug: "documentation"
 url: "/zh-cn/"
 weight: 10
-toc: true
+toc: false
 draft: false
 ---
 
@@ -32,7 +32,7 @@ Gitea的首要目标是创建一个极易安装，运行非常快速，安装和
 - 支持自定义源的 Gravatar 和 Federated Avatar
 - 支持邮件服务
 - 支持后台管理面板
-- 支持 MySQL、PostgreSQL、SQLite3, MSSQL 和 TiDB（实验性支持） 数据库
+- 支持 MySQL、PostgreSQL、SQLite3、MSSQL 和 TiDB(MySQL) 数据库
 - 支持多语言本地化（21 种语言）
 
 ## 系统要求
@@ -47,8 +47,8 @@ Gitea的首要目标是创建一个极易安装，运行非常快速，安装和
 
 ## 组件
 
-* Web框架： [Macaron](http://go-macaron.com/)
-* ORM： [XORM](https://github.com/go-xorm/xorm)
+* Web框架： [Chi](http://github.com/go-chi/chi)
+* ORM: [XORM](https://xorm.io)
 * UI组件：
   * [Semantic UI](http://semantic-ui.com/)
   * [GitHub Octicons](https://octicons.github.com/)
@@ -56,9 +56,7 @@ Gitea的首要目标是创建一个极易安装，运行非常快速，安装和
   * [DropzoneJS](http://www.dropzonejs.com/)
   * [Highlight](https://highlightjs.org/)
   * [Clipboard](https://zenorocha.github.io/clipboard.js/)
-  * [Emojify](https://github.com/Ranks/emojify.js)
   * [CodeMirror](https://codemirror.net/)
-  * [jQuery Date Time Picker](https://github.com/xdan/datetimepicker)
   * [jQuery MiniColors](https://github.com/claviska/jquery-minicolors)
 * 数据库驱动：
   * [github.com/go-sql-driver/mysql](https://github.com/go-sql-driver/mysql)

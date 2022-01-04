@@ -5,9 +5,10 @@
 package git
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
+
+	"code.gitea.io/gitea/modules/util"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -16,10 +17,12 @@ func TestRepository_GetTags(t *testing.T) {
 	bareRepo1Path := filepath.Join(testReposDir, "repo1_bare")
 	bareRepo1, err := OpenRepository(bareRepo1Path)
 	assert.NoError(t, err)
+	defer bareRepo1.Close()
 
-	tags, err := bareRepo1.GetTagInfos()
+	tags, total, err := bareRepo1.GetTagInfos(0, 0)
 	assert.NoError(t, err)
 	assert.Len(t, tags, 1)
+	assert.Equal(t, len(tags), total)
 	assert.EqualValues(t, "test", tags[0].Name)
 	assert.EqualValues(t, "3ad28a9149a2864384548f3d17ed7f38014c9e8a", tags[0].ID.String())
 	assert.EqualValues(t, "tag", tags[0].Type)
@@ -30,10 +33,11 @@ func TestRepository_GetTag(t *testing.T) {
 
 	clonedPath, err := cloneRepo(bareRepo1Path, testReposDir, "repo1_TestRepository_GetTag")
 	assert.NoError(t, err)
-	defer os.RemoveAll(clonedPath)
+	defer util.RemoveAll(clonedPath)
 
 	bareRepo1, err := OpenRepository(clonedPath)
 	assert.NoError(t, err)
+	defer bareRepo1.Close()
 
 	lTagCommitID := "6fbd69e9823458e6c4a2fc5c0f6bc022b2f2acd1"
 	lTagName := "lightweightTag"
@@ -41,14 +45,17 @@ func TestRepository_GetTag(t *testing.T) {
 
 	aTagCommitID := "8006ff9adbf0cb94da7dad9e537e53817f9fa5c0"
 	aTagName := "annotatedTag"
-	aTagMessage := "my annotated message"
+	aTagMessage := "my annotated message \n - test two line"
 	bareRepo1.CreateAnnotatedTag(aTagName, aTagMessage, aTagCommitID)
 	aTagID, _ := bareRepo1.GetTagID(aTagName)
 
 	lTag, err := bareRepo1.GetTag(lTagName)
-	lTag.repo = nil
 	assert.NoError(t, err)
 	assert.NotNil(t, lTag)
+	if lTag == nil {
+		assert.FailNow(t, "nil lTag: %s", lTagName)
+	}
+	lTag.repo = nil
 	assert.EqualValues(t, lTagName, lTag.Name)
 	assert.EqualValues(t, lTagCommitID, lTag.ID.String())
 	assert.EqualValues(t, lTagCommitID, lTag.Object.String())
@@ -57,6 +64,9 @@ func TestRepository_GetTag(t *testing.T) {
 	aTag, err := bareRepo1.GetTag(aTagName)
 	assert.NoError(t, err)
 	assert.NotNil(t, aTag)
+	if aTag == nil {
+		assert.FailNow(t, "nil aTag: %s", aTagName)
+	}
 	assert.EqualValues(t, aTagName, aTag.Name)
 	assert.EqualValues(t, aTagID, aTag.ID.String())
 	assert.NotEqual(t, aTagID, aTag.Object.String())
@@ -79,10 +89,11 @@ func TestRepository_GetAnnotatedTag(t *testing.T) {
 
 	clonedPath, err := cloneRepo(bareRepo1Path, testReposDir, "repo1_TestRepository_GetTag")
 	assert.NoError(t, err)
-	defer os.RemoveAll(clonedPath)
+	defer util.RemoveAll(clonedPath)
 
 	bareRepo1, err := OpenRepository(clonedPath)
 	assert.NoError(t, err)
+	defer bareRepo1.Close()
 
 	lTagCommitID := "6fbd69e9823458e6c4a2fc5c0f6bc022b2f2acd1"
 	lTagName := "lightweightTag"

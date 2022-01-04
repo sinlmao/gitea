@@ -1,3 +1,7 @@
+// Copyright 2020 The Gitea Authors. All rights reserved.
+// Use of this source code is governed by a MIT-style
+// license that can be found in the LICENSE file.
+
 package main
 
 /*
@@ -5,9 +9,9 @@ Checkout a PR and load the tests data into sqlite database
 */
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -21,19 +25,19 @@ import (
 	"time"
 
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/models/unittest"
+	gitea_git "code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/markup"
 	"code.gitea.io/gitea/modules/markup/external"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/routers"
-	"code.gitea.io/gitea/routers/routes"
 
-	"github.com/go-xorm/xorm"
-	context2 "github.com/gorilla/context"
-	"github.com/unknwon/com"
-	"gopkg.in/src-d/go-git.v4"
-	"gopkg.in/src-d/go-git.v4/config"
-	"gopkg.in/src-d/go-git.v4/plumbing"
-	"gopkg.in/testfixtures.v2"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"xorm.io/xorm"
 )
 
 var codeFilePath = "contrib/pr/checkout.go"
@@ -45,13 +49,13 @@ func runPR() {
 		log.Fatal(err)
 	}
 	setting.SetCustomPathAndConf("", "", "")
-	setting.NewContext()
+	setting.LoadAllowEmpty()
 
-	setting.RepoRootPath, err = ioutil.TempDir(os.TempDir(), "repos")
+	setting.RepoRootPath, err = os.MkdirTemp(os.TempDir(), "repos")
 	if err != nil {
 		log.Fatalf("TempDir: %v\n", err)
 	}
-	setting.AppDataPath, err = ioutil.TempDir(os.TempDir(), "appdata")
+	setting.AppDataPath, err = os.MkdirTemp(os.TempDir(), "appdata")
 	if err != nil {
 		log.Fatalf("TempDir: %v\n", err)
 	}
@@ -76,46 +80,45 @@ func runPR() {
 	setting.RunUser = curUser.Username
 
 	log.Printf("[PR] Loading fixtures data ...\n")
-	setting.CheckLFSVersion()
+	gitea_git.CheckLFSVersion()
 	//models.LoadConfigs()
 	/*
 		setting.Database.Type = "sqlite3"
 		setting.Database.Path = ":memory:"
 		setting.Database.Timeout = 500
 	*/
-	db := setting.Cfg.Section("database")
-	db.NewKey("DB_TYPE", "sqlite3")
-	db.NewKey("PATH", ":memory:")
+	dbCfg := setting.Cfg.Section("database")
+	dbCfg.NewKey("DB_TYPE", "sqlite3")
+	dbCfg.NewKey("PATH", ":memory:")
 
-	routers.NewServices()
+	routers.InitGitServices()
 	setting.Database.LogSQL = true
 	//x, err = xorm.NewEngine("sqlite3", "file::memory:?cache=shared")
 
-	var helper testfixtures.Helper = &testfixtures.SQLite{}
-	models.NewEngine(func(_ *xorm.Engine) error {
+	db.InitEngineWithMigration(context.Background(), func(_ *xorm.Engine) error {
 		return nil
 	})
-	models.HasEngine = true
+	db.HasEngine = true
 	//x.ShowSQL(true)
-	err = models.InitFixtures(
-		helper,
-		path.Join(curDir, "models/fixtures/"),
+	err = unittest.InitFixtures(
+		unittest.FixturesOptions{
+			Dir: path.Join(curDir, "models/fixtures/"),
+		},
 	)
 	if err != nil {
 		fmt.Printf("Error initializing test database: %v\n", err)
 		os.Exit(1)
 	}
-	models.LoadFixtures()
-	os.RemoveAll(setting.RepoRootPath)
-	os.RemoveAll(models.LocalCopyPath())
-	com.CopyDir(path.Join(curDir, "integrations/gitea-repositories-meta"), setting.RepoRootPath)
+	unittest.LoadFixtures()
+	util.RemoveAll(setting.RepoRootPath)
+	util.RemoveAll(models.LocalCopyPath())
+	util.CopyDir(path.Join(curDir, "integrations/gitea-repositories-meta"), setting.RepoRootPath)
 
 	log.Printf("[PR] Setting up router\n")
 	//routers.GlobalInit()
-	external.RegisterParsers()
+	external.RegisterRenderers()
 	markup.Init()
-	m := routes.NewMacaron()
-	routes.RegisterRoutes(m)
+	c := routers.NormalRoutes()
 
 	log.Printf("[PR] Ready for testing !\n")
 	log.Printf("[PR] Login with user1, user2, user3, ... with pass: password\n")
@@ -135,24 +138,24 @@ func runPR() {
 	*/
 
 	//Start the server
-	http.ListenAndServe(":8080", context2.ClearHandler(m))
+	http.ListenAndServe(":8080", c)
 
 	log.Printf("[PR] Cleaning up ...\n")
 	/*
-		if err = os.RemoveAll(setting.Indexer.IssuePath); err != nil {
-			fmt.Printf("os.RemoveAll: %v\n", err)
+		if err = util.RemoveAll(setting.Indexer.IssuePath); err != nil {
+			fmt.Printf("util.RemoveAll: %v\n", err)
 			os.Exit(1)
 		}
-		if err = os.RemoveAll(setting.Indexer.RepoPath); err != nil {
+		if err = util.RemoveAll(setting.Indexer.RepoPath); err != nil {
 			fmt.Printf("Unable to remove repo indexer: %v\n", err)
 			os.Exit(1)
 		}
 	*/
-	if err = os.RemoveAll(setting.RepoRootPath); err != nil {
-		log.Fatalf("os.RemoveAll: %v\n", err)
+	if err = util.RemoveAll(setting.RepoRootPath); err != nil {
+		log.Fatalf("util.RemoveAll: %v\n", err)
 	}
-	if err = os.RemoveAll(setting.AppDataPath); err != nil {
-		log.Fatalf("os.RemoveAll: %v\n", err)
+	if err = util.RemoveAll(setting.AppDataPath); err != nil {
+		log.Fatalf("util.RemoveAll: %v\n", err)
 	}
 }
 
@@ -179,7 +182,7 @@ func main() {
 	codeFilePath = filepath.FromSlash(codeFilePath) //Convert to running OS
 
 	//Copy this file if it will not exist in the PR branch
-	dat, err := ioutil.ReadFile(codeFilePath)
+	dat, err := os.ReadFile(codeFilePath)
 	if err != nil {
 		log.Fatalf("Failed to cache this code file : %v", err)
 	}
@@ -196,7 +199,9 @@ func main() {
 	}
 	remoteUpstream := "origin" //Default
 	for _, r := range remotes {
-		if r.Config().URLs[0] == "https://github.com/go-gitea/gitea" || r.Config().URLs[0] == "git@github.com:go-gitea/gitea.git" { //fetch at index 0
+		if r.Config().URLs[0] == "https://github.com/go-gitea/gitea.git" ||
+			r.Config().URLs[0] == "https://github.com/go-gitea/gitea" ||
+			r.Config().URLs[0] == "git@github.com:go-gitea/gitea.git" { //fetch at index 0
 			remoteUpstream = r.Config().Name
 			break
 		}
@@ -210,7 +215,7 @@ func main() {
 		//Use git cli command for windows
 		runCmd("git", "fetch", remoteUpstream, fmt.Sprintf("pull/%s/head:%s", pr, branch))
 	} else {
-		ref := fmt.Sprintf("refs/pull/%s/head:%s", pr, branchRef)
+		ref := fmt.Sprintf("%s%s/head:%s", gitea_git.PullPrefix, pr, branchRef)
 		err = repo.Fetch(&git.FetchOptions{
 			RemoteName: remoteUpstream,
 			RefSpecs: []config.RefSpec{
@@ -241,14 +246,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to duplicate this code file in PR : %v", err)
 		}
-		err = ioutil.WriteFile(codeFilePath, dat, 0644)
+		err = os.WriteFile(codeFilePath, dat, 0644)
 		if err != nil {
 			log.Fatalf("Failed to duplicate this code file in PR : %v", err)
 		}
 	}
-	time.Sleep(5 * time.Second)
+	//Force build of js, css, bin, ...
+	runCmd("make", "build")
 	//Start with integration test
-	runCmd("go", "run", "-tags", "sqlite sqlite_unlock_notify", codeFilePath, "-run")
+	runCmd("go", "run", "-mod", "vendor", "-tags", "sqlite sqlite_unlock_notify", codeFilePath, "-run")
 }
 func runCmd(cmd ...string) {
 	log.Printf("Executing : %s ...\n", cmd)

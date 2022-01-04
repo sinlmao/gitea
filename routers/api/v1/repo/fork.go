@@ -1,13 +1,24 @@
 // Copyright 2016 The Gogs Authors. All rights reserved.
+// Copyright 2020 The Gitea Authors.
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
 package repo
 
 import (
+	"fmt"
+	"net/http"
+
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/perm"
+	repo_model "code.gitea.io/gitea/models/repo"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/convert"
 	api "code.gitea.io/gitea/modules/structs"
+	"code.gitea.io/gitea/modules/web"
+	"code.gitea.io/gitea/routers/api/v1/utils"
+	repo_service "code.gitea.io/gitea/services/repository"
 )
 
 // ListForks list a repository's forks
@@ -28,28 +39,39 @@ func ListForks(ctx *context.APIContext) {
 	//   description: name of the repo
 	//   type: string
 	//   required: true
+	// - name: page
+	//   in: query
+	//   description: page number of results to return (1-based)
+	//   type: integer
+	// - name: limit
+	//   in: query
+	//   description: page size of results
+	//   type: integer
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/RepositoryList"
-	forks, err := ctx.Repo.Repository.GetForks()
+
+	forks, err := repo_model.GetForks(ctx.Repo.Repository, utils.GetListOptions(ctx))
 	if err != nil {
-		ctx.Error(500, "GetForks", err)
+		ctx.Error(http.StatusInternalServerError, "GetForks", err)
 		return
 	}
 	apiForks := make([]*api.Repository, len(forks))
 	for i, fork := range forks {
 		access, err := models.AccessLevel(ctx.User, fork)
 		if err != nil {
-			ctx.Error(500, "AccessLevel", err)
+			ctx.Error(http.StatusInternalServerError, "AccessLevel", err)
 			return
 		}
-		apiForks[i] = fork.APIFormat(access)
+		apiForks[i] = convert.ToRepo(fork, access)
 	}
-	ctx.JSON(200, apiForks)
+
+	ctx.SetTotalCountHeader(int64(ctx.Repo.Repository.NumForks))
+	ctx.JSON(http.StatusOK, apiForks)
 }
 
 // CreateFork create a fork of a repo
-func CreateFork(ctx *context.APIContext, form api.CreateForkOption) {
+func CreateFork(ctx *context.APIContext) {
 	// swagger:operation POST /repos/{owner}/{repo}/forks repository createFork
 	// ---
 	// summary: Fork a repository
@@ -73,34 +95,60 @@ func CreateFork(ctx *context.APIContext, form api.CreateForkOption) {
 	// responses:
 	//   "202":
 	//     "$ref": "#/responses/Repository"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
+	//   "409":
+	//     description: The repository with the same name already exists.
+	//   "422":
+	//     "$ref": "#/responses/validationError"
+
+	form := web.GetForm(ctx).(*api.CreateForkOption)
 	repo := ctx.Repo.Repository
-	var forker *models.User // user/org that will own the fork
+	var forker *user_model.User // user/org that will own the fork
 	if form.Organization == nil {
 		forker = ctx.User
 	} else {
 		org, err := models.GetOrgByName(*form.Organization)
 		if err != nil {
 			if models.IsErrOrgNotExist(err) {
-				ctx.Error(422, "", err)
+				ctx.Error(http.StatusUnprocessableEntity, "", err)
 			} else {
-				ctx.Error(500, "GetOrgByName", err)
+				ctx.Error(http.StatusInternalServerError, "GetOrgByName", err)
 			}
 			return
 		}
 		isMember, err := org.IsOrgMember(ctx.User.ID)
 		if err != nil {
-			ctx.ServerError("IsOrgMember", err)
+			ctx.Error(http.StatusInternalServerError, "IsOrgMember", err)
 			return
 		} else if !isMember {
-			ctx.Status(403)
+			ctx.Error(http.StatusForbidden, "isMemberNot", fmt.Sprintf("User is no Member of Organisation '%s'", org.Name))
 			return
 		}
-		forker = org
+		forker = org.AsUser()
 	}
-	fork, err := models.ForkRepository(ctx.User, forker, repo, repo.Name, repo.Description)
+
+	var name string
+	if form.Name == nil {
+		name = repo.Name
+	} else {
+		name = *form.Name
+	}
+
+	fork, err := repo_service.ForkRepository(ctx.User, forker, repo_service.ForkRepoOptions{
+		BaseRepo:    repo,
+		Name:        name,
+		Description: repo.Description,
+	})
 	if err != nil {
-		ctx.Error(500, "ForkRepository", err)
+		if repo_model.IsErrRepoAlreadyExist(err) {
+			ctx.Error(http.StatusConflict, "ForkRepository", err)
+		} else {
+			ctx.Error(http.StatusInternalServerError, "ForkRepository", err)
+		}
 		return
 	}
-	ctx.JSON(202, fork.APIFormat(models.AccessModeOwner))
+
+	//TODO change back to 201
+	ctx.JSON(http.StatusAccepted, convert.ToRepo(fork, perm.AccessModeOwner))
 }

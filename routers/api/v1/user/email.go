@@ -5,11 +5,15 @@
 package user
 
 import (
-	"code.gitea.io/gitea/models"
+	"fmt"
+	"net/http"
+
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/convert"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/convert"
+	"code.gitea.io/gitea/modules/web"
 )
 
 // ListEmails list all of the authenticated user's email addresses
@@ -23,20 +27,21 @@ func ListEmails(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/EmailList"
-	emails, err := models.GetEmailAddresses(ctx.User.ID)
+
+	emails, err := user_model.GetEmailAddresses(ctx.User.ID)
 	if err != nil {
-		ctx.Error(500, "GetEmailAddresses", err)
+		ctx.Error(http.StatusInternalServerError, "GetEmailAddresses", err)
 		return
 	}
 	apiEmails := make([]*api.Email, len(emails))
 	for i := range emails {
 		apiEmails[i] = convert.ToEmail(emails[i])
 	}
-	ctx.JSON(200, &apiEmails)
+	ctx.JSON(http.StatusOK, &apiEmails)
 }
 
 // AddEmail add an email address
-func AddEmail(ctx *context.APIContext, form api.CreateEmailOption) {
+func AddEmail(ctx *context.APIContext) {
 	// swagger:operation POST /user/emails user userAddEmail
 	// ---
 	// summary: Add email addresses
@@ -55,25 +60,31 @@ func AddEmail(ctx *context.APIContext, form api.CreateEmailOption) {
 	// responses:
 	//   '201':
 	//     "$ref": "#/responses/EmailList"
+	//   "422":
+	//     "$ref": "#/responses/validationError"
+	form := web.GetForm(ctx).(*api.CreateEmailOption)
 	if len(form.Emails) == 0 {
-		ctx.Status(422)
+		ctx.Error(http.StatusUnprocessableEntity, "", "Email list empty")
 		return
 	}
 
-	emails := make([]*models.EmailAddress, len(form.Emails))
+	emails := make([]*user_model.EmailAddress, len(form.Emails))
 	for i := range form.Emails {
-		emails[i] = &models.EmailAddress{
+		emails[i] = &user_model.EmailAddress{
 			UID:         ctx.User.ID,
 			Email:       form.Emails[i],
 			IsActivated: !setting.Service.RegisterEmailConfirm,
 		}
 	}
 
-	if err := models.AddEmailAddresses(emails); err != nil {
-		if models.IsErrEmailAlreadyUsed(err) {
-			ctx.Error(422, "", "Email address has been used: "+err.(models.ErrEmailAlreadyUsed).Email)
+	if err := user_model.AddEmailAddresses(emails); err != nil {
+		if user_model.IsErrEmailAlreadyUsed(err) {
+			ctx.Error(http.StatusUnprocessableEntity, "", "Email address has been used: "+err.(user_model.ErrEmailAlreadyUsed).Email)
+		} else if user_model.IsErrEmailInvalid(err) {
+			errMsg := fmt.Sprintf("Email address %s invalid", err.(user_model.ErrEmailInvalid).Email)
+			ctx.Error(http.StatusUnprocessableEntity, "", errMsg)
 		} else {
-			ctx.Error(500, "AddEmailAddresses", err)
+			ctx.Error(http.StatusInternalServerError, "AddEmailAddresses", err)
 		}
 		return
 	}
@@ -82,11 +93,11 @@ func AddEmail(ctx *context.APIContext, form api.CreateEmailOption) {
 	for i := range emails {
 		apiEmails[i] = convert.ToEmail(emails[i])
 	}
-	ctx.JSON(201, &apiEmails)
+	ctx.JSON(http.StatusCreated, &apiEmails)
 }
 
 // DeleteEmail delete email
-func DeleteEmail(ctx *context.APIContext, form api.DeleteEmailOption) {
+func DeleteEmail(ctx *context.APIContext) {
 	// swagger:operation DELETE /user/emails user userDeleteEmail
 	// ---
 	// summary: Delete email addresses
@@ -100,22 +111,29 @@ func DeleteEmail(ctx *context.APIContext, form api.DeleteEmailOption) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+	//   "404":
+	//     "$ref": "#/responses/notFound"
+	form := web.GetForm(ctx).(*api.DeleteEmailOption)
 	if len(form.Emails) == 0 {
-		ctx.Status(204)
+		ctx.Status(http.StatusNoContent)
 		return
 	}
 
-	emails := make([]*models.EmailAddress, len(form.Emails))
+	emails := make([]*user_model.EmailAddress, len(form.Emails))
 	for i := range form.Emails {
-		emails[i] = &models.EmailAddress{
+		emails[i] = &user_model.EmailAddress{
 			Email: form.Emails[i],
 			UID:   ctx.User.ID,
 		}
 	}
 
-	if err := models.DeleteEmailAddresses(emails); err != nil {
-		ctx.Error(500, "DeleteEmailAddresses", err)
+	if err := user_model.DeleteEmailAddresses(emails); err != nil {
+		if user_model.IsErrEmailAddressNotExist(err) {
+			ctx.Error(http.StatusNotFound, "DeleteEmailAddresses", err)
+			return
+		}
+		ctx.Error(http.StatusInternalServerError, "DeleteEmailAddresses", err)
 		return
 	}
-	ctx.Status(204)
+	ctx.Status(http.StatusNoContent)
 }

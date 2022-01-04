@@ -1,77 +1,169 @@
 {{template "base/head" .}}
-<div class="repository diff">
+<div class="page-content repository diff">
 	{{template "repo/header" .}}
 	<div class="ui container {{if .IsSplitStyle}}fluid padded{{end}}">
-		<div class="ui top attached info clearing segment {{if .Commit.Signature}} isSigned {{if .Verification.Verified }} isVerified {{end}}{{end}}">
-			<a class="ui floated right blue tiny button" href="{{EscapePound .SourcePath}}">
+		{{$class := ""}}
+		{{if .Commit.Signature}}
+			{{$class = (printf "%s%s" $class " isSigned")}}
+			{{if .Verification.Verified}}
+				{{if eq .Verification.TrustStatus "trusted"}}
+					{{$class = (printf "%s%s" $class " isVerified")}}
+				{{else if eq .Verification.TrustStatus "untrusted"}}
+					{{$class = (printf "%s%s" $class " isVerifiedUntrusted")}}
+				{{else}}
+					{{$class = (printf "%s%s" $class " isVerifiedUnmatched")}}
+				{{end}}
+			{{else if .Verification.Warning}}
+				{{$class = (printf "%s%s" $class " isWarning")}}
+			{{end}}
+		{{end}}
+		<div class="ui top attached header clearing segment pr {{$class}}">
+			{{if not $.PageIsWiki}}
+			<a class="ui blue tiny button browse-button" href="{{.SourcePath}}">
 				{{.i18n.Tr "repo.diff.browse_source"}}
 			</a>
-			<h3 class="has-emoji">{{RenderCommitMessage .Commit.Message $.RepoLink $.Repository.ComposeMetas}}{{template "repo/commit_status" .CommitStatus}}</h3>
+			{{end}}
+			<h3 class="mt-0"><span class="message-wrapper"><span class="commit-summary" title="{{.Commit.Summary}}">{{RenderCommitMessage .Commit.Message $.RepoLink $.Repository.ComposeMetas}}</span></span>{{template "repo/commit_statuses" dict "Status" .CommitStatus "Statuses" .CommitStatuses  "root" $}}</h3>
 			{{if IsMultilineCommitMessage .Commit.Message}}
 				<pre class="commit-body">{{RenderCommitBody .Commit.Message $.RepoLink $.Repository.ComposeMetas}}</pre>
 			{{end}}
-			<span class="text grey"><i class="octicon octicon-git-branch"></i>{{.BranchName}}</span>
+			{{if .BranchName}}
+				<span class="text grey mr-3">{{svg "octicon-git-branch" 16 "mr-2"}}{{.BranchName}}</span>
+			{{end}}
+			{{if .TagName}}
+				<span class="text grey mr-3">{{svg "octicon-tag" 16 "mr-2"}}{{.TagName}}</span>
+			{{end}}
 		</div>
-		<div class="ui attached info segment {{if .Commit.Signature}} isSigned {{if .Verification.Verified }} isVerified {{end}}{{end}}">
-			<div class="ui stackable grid">
-				<div class="nine wide column">
+		<div class="ui attached segment df ac sb py-2 commit-header-row {{$class}}">
+				<div class="df ac">
 					{{if .Author}}
-						<img class="ui avatar image" src="{{.Author.RelAvatarLink}}" />
-					{{if .Author.FullName}}
-					<a href="{{.Author.HomeLink}}"><strong>{{.Author.FullName}}</strong></a> {{if .IsSigned}}<{{.Commit.Author.Email}}>{{end}}
+						{{avatar .Author 28 "mr-3"}}
+						{{if .Author.FullName}}
+							<a href="{{.Author.HomeLink}}"><strong>{{.Author.FullName}}</strong></a>
+						{{else}}
+							<a href="{{.Author.HomeLink}}"><strong>{{.Commit.Author.Name}}</strong></a>
+						{{end}}
 					{{else}}
-					<a href="{{.Author.HomeLink}}"><strong>{{.Commit.Author.Name}}</strong></a> {{if .IsSigned}}<{{.Commit.Author.Email}}>{{end}}
-					{{end}}
-					{{else}}
-						<img class="ui avatar image" src="{{AvatarLink .Commit.Author.Email}}" />
+						{{avatarByEmail .Commit.Author.Email .Commit.Author.Email 28 "mr-3"}}
 						<strong>{{.Commit.Author.Name}}</strong>
 					{{end}}
-					<span class="text grey" id="authored-time">{{TimeSince .Commit.Author.When $.Lang}}</span>
-				</div>
-				<div class="seven wide right aligned column">
-					<div class="ui horizontal list">
-						{{if .Parents}}
-							<div class="item">
-								{{.i18n.Tr "repo.diff.parent"}}
-							</div>
-							<div class="item">
-								{{range .Parents}}
-									<a class="ui blue sha label" href="{{$.RepoLink}}/commit/{{.}}">{{ShortSha .}}</a>
-								{{end}}
-							</div>
+					<span class="text grey ml-3" id="authored-time">{{TimeSince .Commit.Author.When $.Lang}}</span>
+					{{if or (ne .Commit.Committer.Name .Commit.Author.Name) (ne .Commit.Committer.Email .Commit.Author.Email)}}
+						<span class="text grey mx-3">{{.i18n.Tr "repo.diff.committed_by"}}</span>
+						{{if ne .Verification.CommittingUser.ID 0}}
+							{{avatar .Verification.CommittingUser 28 "mx-3"}}
+							<a href="{{.Verification.CommittingUser.HomeLink}}"><strong>{{.Commit.Committer.Name}}</strong></a>
+						{{else}}
+							{{avatarByEmail .Commit.Committer.Email .Commit.Committer.Name 28 "mr-3"}}
+							<strong>{{.Commit.Committer.Name}}</strong>
 						{{end}}
-						<div class="mobile-only"></div>
-						<div class="item">{{.i18n.Tr "repo.diff.commit"}}</div>
-						<div class="item"><span class="ui blue sha label">{{ShortSha .CommitID}}</span></div>
-					</div>
-				</div><!-- end column -->
-			</div><!-- end grid -->
+					{{end}}
+				</div>
+				<div class="ui horizontal list df ac">
+					{{if .Parents}}
+						<div class="item">
+							{{.i18n.Tr "repo.diff.parent"}}
+						</div>
+						<div class="item">
+							{{range .Parents}}
+								{{if $.PageIsWiki}}
+									<a class="ui blue sha label" href="{{$.RepoLink}}/wiki/commit/{{PathEscape .}}">{{ShortSha .}}</a>
+								{{else}}
+									<a class="ui blue sha label" href="{{$.RepoLink}}/commit/{{PathEscape .}}">{{ShortSha .}}</a>
+								{{end}}
+							{{end}}
+						</div>
+					{{end}}
+					<div class="mobile-only"></div>
+					<div class="item">{{.i18n.Tr "repo.diff.commit"}}</div>
+					<div class="item"><span class="ui blue sha label">{{ShortSha .CommitID}}</span></div>
+				</div>
 		</div>
 		{{if .Commit.Signature}}
-			{{if .Verification.Verified }}
-				<div class="ui bottom attached positive message">
-				  <i class="green lock icon"></i>
-					<span>{{.i18n.Tr "repo.commits.signed_by"}}:</span>
-					<a href="{{.Verification.SigningUser.HomeLink}}"><strong>{{.Commit.Committer.Name}}</strong></a> <{{.Commit.Committer.Email}}>
-					<span class="pull-right"><span>{{.i18n.Tr "repo.commits.gpg_key_id"}}:</span> {{.Verification.SigningKey.KeyID}}</span>
+			<div class="ui bottom attached message tl df ac sb commit-header-row {{$class}}">
+				<div class="df ac">
+					{{if .Verification.Verified}}
+						{{if ne .Verification.SigningUser.ID 0}}
+							{{svg "gitea-lock" 16 "mr-3"}}
+							{{if eq .Verification.TrustStatus "trusted"}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.signed_by"}}:</span>
+							{{else if eq .Verification.TrustStatus "untrusted"}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.signed_by_untrusted_user"}}:</span>
+							{{else}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.signed_by_untrusted_user_unmatched"}}:</span>
+							{{end}}
+							{{avatar .Verification.SigningUser 28}}
+							<a href="{{.Verification.SigningUser.HomeLink}}"><strong>{{.Verification.SigningUser.Name}}</strong></a>
+						{{else}}
+							<span title="{{.i18n.Tr "gpg.default_key"}}">{{svg "gitea-lock-cog"}}</span>
+							<span class="ui text">{{.i18n.Tr "repo.commits.signed_by"}}:</span>
+							{{avatarByEmail .Verification.SigningEmail "" 28}}
+							<strong>{{.Verification.SigningUser.Name}}</strong>
+						{{end}}
+					{{else}}
+						{{svg "gitea-unlock" 16 "mr-3"}}
+						<span class="ui text">{{.i18n.Tr .Verification.Reason}}</span>
+					{{end}}
 				</div>
-			{{else}}
-				<div class="ui bottom attached message">
-				  <i class="grey unlock icon"></i>
-				  {{.i18n.Tr .Verification.Reason}}
+				<div class="df ac">
+					{{if .Verification.Verified}}
+						{{if ne .Verification.SigningUser.ID 0}}
+							{{svg "octicon-shield-check" 16 "mr-3"}}
+							{{if .Verification.SigningSSHKey}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.ssh_key_fingerprint"}}:</span>
+								{{.Verification.SigningSSHKey.Fingerprint}}
+							{{else}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.gpg_key_id"}}:</span>
+								{{.Verification.SigningKey.KeyID}}
+							{{end}}
+						{{else}}
+							{{svg "octicon-shield-lock" 16 "mr-3"}}
+							{{if .Verification.SigningSSHKey}}
+								<span class="ui text mr-3 tooltip" data-content="{{.i18n.Tr "gpg.default_key"}}">{{.i18n.Tr "repo.commits.ssh_key_fingerprint"}}:</span>
+								{{.Verification.SigningSSHKey.Fingerprint}}
+							{{else}}
+								<span class="ui text mr-3 tooltip" data-content="{{.i18n.Tr "gpg.default_key"}}">{{.i18n.Tr "repo.commits.gpg_key_id"}}:</span>
+								{{.Verification.SigningKey.KeyID}}
+							{{end}}
+						{{end}}
+					{{else if .Verification.Warning}}
+						{{svg "octicon-shield" 16 "mr-3"}}
+						{{if .Verification.SigningSSHKey}}
+							<span class="ui text mr-3">{{.i18n.Tr "repo.commits.ssh_key_fingerprint"}}:</span>
+							{{.Verification.SigningSSHKey.Fingerprint}}
+						{{else}}
+							<span class="ui text mr-3">{{.i18n.Tr "repo.commits.gpg_key_id"}}:</span>
+							{{.Verification.SigningKey.KeyID}}
+						{{end}}
+					{{else}}
+						{{if .Verification.SigningKey}}
+							{{if ne .Verification.SigningKey.KeyID ""}}
+								{{svg "octicon-shield" 16 "mr-3"}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.gpg_key_id"}}:</span>
+								{{.Verification.SigningKey.KeyID}}
+							{{end}}
+						{{end}}
+						{{if .Verification.SigningSSHKey}}
+							{{if ne .Verification.SigningSSHKey.Fingerprint ""}}
+								{{svg "octicon-shield" 16 "mr-3"}}
+								<span class="ui text mr-3">{{.i18n.Tr "repo.commits.ssh_key_fingerprint"}}:</span>
+								{{.Verification.SigningSSHKey.Fingerprint}}
+							{{end}}
+						{{end}}
+					{{end}}
 				</div>
-			{{end}}
+			</div>
 		{{end}}
 		{{if .Note}}
-			<div class="ui top attached info segment message git-notes">
-				<i class="sticky note icon"></i>
+			<div class="ui top attached header segment git-notes">
+				{{svg "octicon-note" 16 "mr-3"}}
 				{{.i18n.Tr "repo.diff.git-notes"}}:
 				{{if .NoteAuthor}}
 					<a href="{{.NoteAuthor.HomeLink}}">
 						{{if .NoteAuthor.FullName}}
-						  <strong>{{.NoteAuthor.FullName}}</strong>
+							<strong>{{.NoteAuthor.FullName}}</strong>
 						{{else}}
-						  <strong>{{.NoteCommit.Author.Name}}</strong>
+							<strong>{{.NoteCommit.Author.Name}}</strong>
 						{{end}}
 					</a>
 				{{else}}

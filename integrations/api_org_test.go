@@ -10,7 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
 
@@ -43,7 +44,7 @@ func TestAPIOrgCreate(t *testing.T) {
 		assert.Equal(t, org.Location, apiOrg.Location)
 		assert.Equal(t, org.Visibility, apiOrg.Visibility)
 
-		models.AssertExistsAndLoadBean(t, &models.User{
+		unittest.AssertExistsAndLoadBean(t, &user_model.User{
 			Name:      org.UserName,
 			LowerName: strings.ToLower(org.UserName),
 			FullName:  org.FullName,
@@ -69,7 +70,7 @@ func TestAPIOrgCreate(t *testing.T) {
 		// user1 on this org is public
 		var users []*api.User
 		DecodeJSON(t, resp, &users)
-		assert.EqualValues(t, 1, len(users))
+		assert.Len(t, users, 1)
 		assert.EqualValues(t, "user1", users[0].UserName)
 	})
 }
@@ -135,4 +136,18 @@ func TestAPIOrgDeny(t *testing.T) {
 		req = NewRequestf(t, "GET", "/api/v1/orgs/%s/members", orgName)
 		MakeRequest(t, req, http.StatusNotFound)
 	})
+}
+
+func TestAPIGetAll(t *testing.T) {
+	defer prepareTestEnv(t)()
+
+	req := NewRequestf(t, "GET", "/api/v1/orgs")
+	resp := MakeRequest(t, req, http.StatusOK)
+
+	var apiOrgList []*api.Organization
+	DecodeJSON(t, resp, &apiOrgList)
+
+	assert.Len(t, apiOrgList, 7)
+	assert.Equal(t, "org25", apiOrgList[0].FullName)
+	assert.Equal(t, "public", apiOrgList[0].Visibility)
 }

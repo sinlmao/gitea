@@ -6,6 +6,8 @@
 package markup
 
 import (
+	"html/template"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,10 +37,27 @@ func Test_Sanitizer(t *testing.T) {
 <code class="language-lol&#32;ui&#32;container&#32;input&#32;massive&#32;basic&#32;segment">Hello there! Something has gone wrong, we are working on it.</code>
 <code class="language-lol&#32;ui&#32;container&#32;input&#32;huge&#32;basic&#32;segment">In the meantime, play a game with us at&nbsp;<a href="http://example.com/">example.com</a>.</code>
 </code>`, "<code>\n<code>\u00a0</code>\n<img src=\"https://try.gogs.io/img/favicon.png\" width=\"200\" height=\"200\">\n<code>Hello there! Something has gone wrong, we are working on it.</code>\n<code>In the meantime, play a game with us at\u00a0<a href=\"http://example.com/\" rel=\"nofollow\">example.com</a>.</code>\n</code>",
+
+		// <kbd> tags
+		`<kbd>Ctrl + C</kbd>`, `<kbd>Ctrl + C</kbd>`,
+		`<i class="dropdown icon">NAUGHTY</i>`, `<i>NAUGHTY</i>`,
+		`<i class="icon dropdown"></i>`, `<i class="icon dropdown"></i>`,
+		`<input type="checkbox" disabled=""/>unchecked`, `<input type="checkbox" disabled=""/>unchecked`,
+		`<span class="emoji dropdown">NAUGHTY</span>`, `<span>NAUGHTY</span>`,
+		`<span class="emoji">contents</span>`, `<span class="emoji">contents</span>`,
 	}
 
 	for i := 0; i < len(testCases); i += 2 {
 		assert.Equal(t, testCases[i+1], Sanitize(testCases[i]))
-		assert.Equal(t, testCases[i+1], string(SanitizeBytes([]byte(testCases[i]))))
 	}
+}
+
+func TestSanitizeNonEscape(t *testing.T) {
+	descStr := "<scrİpt>&lt;script&gt;alert(document.domain)&lt;/script&gt;</scrİpt>"
+
+	output := template.HTML(Sanitize(string(descStr)))
+	if strings.Contains(string(output), "<script>") {
+		t.Errorf("un-escaped <script> in output: %q", output)
+	}
+
 }

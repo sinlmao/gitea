@@ -4,7 +4,12 @@
 
 package models
 
-import "github.com/go-xorm/xorm"
+import (
+	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/modules/structs"
+
+	"xorm.io/builder"
+)
 
 // InsertMilestones creates milestones of repository.
 func InsertMilestones(ms ...*Milestone) (err error) {
@@ -12,11 +17,12 @@ func InsertMilestones(ms ...*Milestone) (err error) {
 		return nil
 	}
 
-	sess := x.NewSession()
-	defer sess.Close()
-	if err = sess.Begin(); err != nil {
+	ctx, committer, err := db.TxContext()
+	if err != nil {
 		return err
 	}
+	defer committer.Close()
+	sess := db.GetEngine(ctx)
 
 	// to return the id, so we should not use batch insert
 	for _, m := range ms {
@@ -25,33 +31,34 @@ func InsertMilestones(ms ...*Milestone) (err error) {
 		}
 	}
 
-	if _, err = sess.Exec("UPDATE `repository` SET num_milestones = num_milestones + ? WHERE id = ?", len(ms), ms[0].RepoID); err != nil {
+	if _, err = db.Exec(ctx, "UPDATE `repository` SET num_milestones = num_milestones + ? WHERE id = ?", len(ms), ms[0].RepoID); err != nil {
 		return err
 	}
-	return sess.Commit()
+	return committer.Commit()
 }
 
 // InsertIssues insert issues to database
 func InsertIssues(issues ...*Issue) error {
-	sess := x.NewSession()
-	if err := sess.Begin(); err != nil {
+	ctx, committer, err := db.TxContext()
+	if err != nil {
 		return err
 	}
+	defer committer.Close()
 
 	for _, issue := range issues {
-		if err := insertIssue(sess, issue); err != nil {
+		if err := insertIssue(db.GetEngine(ctx), issue); err != nil {
 			return err
 		}
 	}
-	return sess.Commit()
+	return committer.Commit()
 }
 
-func insertIssue(sess *xorm.Session, issue *Issue) error {
+func insertIssue(sess db.Engine, issue *Issue) error {
 	if _, err := sess.NoAutoTime().Insert(issue); err != nil {
 		return err
 	}
-	var issueLabels = make([]IssueLabel, 0, len(issue.Labels))
-	var labelIDs = make([]int64, 0, len(issue.Labels))
+	issueLabels := make([]IssueLabel, 0, len(issue.Labels))
+	labelIDs := make([]int64, 0, len(issue.Labels))
 	for _, label := range issue.Labels {
 		issueLabels = append(issueLabels, IssueLabel{
 			IssueID: issue.ID,
@@ -59,8 +66,20 @@ func insertIssue(sess *xorm.Session, issue *Issue) error {
 		})
 		labelIDs = append(labelIDs, label.ID)
 	}
-	if _, err := sess.Insert(issueLabels); err != nil {
-		return err
+	if len(issueLabels) > 0 {
+		if _, err := sess.Insert(issueLabels); err != nil {
+			return err
+		}
+	}
+
+	for _, reaction := range issue.Reactions {
+		reaction.IssueID = issue.ID
+	}
+
+	if len(issue.Reactions) > 0 {
+		if _, err := sess.Insert(issue.Reactions); err != nil {
+			return err
+		}
 	}
 
 	cols := make([]string, 0)
@@ -120,34 +139,48 @@ func InsertIssueComments(comments []*Comment) error {
 		return nil
 	}
 
-	var issueIDs = make(map[int64]bool)
+	issueIDs := make(map[int64]bool)
 	for _, comment := range comments {
 		issueIDs[comment.IssueID] = true
 	}
 
-	sess := x.NewSession()
-	defer sess.Close()
-	if err := sess.Begin(); err != nil {
+	ctx, committer, err := db.TxContext()
+	if err != nil {
 		return err
 	}
-	if _, err := sess.NoAutoTime().Insert(comments); err != nil {
-		return err
+	defer committer.Close()
+	for _, comment := range comments {
+		if _, err := db.GetEngine(ctx).NoAutoTime().Insert(comment); err != nil {
+			return err
+		}
+
+		for _, reaction := range comment.Reactions {
+			reaction.IssueID = comment.IssueID
+			reaction.CommentID = comment.ID
+		}
+		if len(comment.Reactions) > 0 {
+			if err := db.Insert(ctx, comment.Reactions); err != nil {
+				return err
+			}
+		}
 	}
+
 	for issueID := range issueIDs {
-		if _, err := sess.Exec("UPDATE issue set num_comments = (SELECT count(*) FROM comment WHERE issue_id = ?) WHERE id = ?", issueID, issueID); err != nil {
+		if _, err := db.Exec(ctx, "UPDATE issue set num_comments = (SELECT count(*) FROM comment WHERE issue_id = ? AND `type`=?) WHERE id = ?", issueID, CommentTypeComment, issueID); err != nil {
 			return err
 		}
 	}
-	return sess.Commit()
+	return committer.Commit()
 }
 
 // InsertPullRequests inserted pull requests
 func InsertPullRequests(prs ...*PullRequest) error {
-	sess := x.NewSession()
-	defer sess.Close()
-	if err := sess.Begin(); err != nil {
+	ctx, committer, err := db.TxContext()
+	if err != nil {
 		return err
 	}
+	defer committer.Close()
+	sess := db.GetEngine(ctx)
 	for _, pr := range prs {
 		if err := insertIssue(sess, pr.Issue); err != nil {
 			return err
@@ -158,29 +191,77 @@ func InsertPullRequests(prs ...*PullRequest) error {
 		}
 	}
 
-	return sess.Commit()
+	return committer.Commit()
 }
 
 // InsertReleases migrates release
 func InsertReleases(rels ...*Release) error {
-	sess := x.NewSession()
-	if err := sess.Begin(); err != nil {
+	ctx, committer, err := db.TxContext()
+	if err != nil {
 		return err
 	}
+	defer committer.Close()
+	sess := db.GetEngine(ctx)
 
 	for _, rel := range rels {
 		if _, err := sess.NoAutoTime().Insert(rel); err != nil {
 			return err
 		}
 
-		for i := 0; i < len(rel.Attachments); i++ {
-			rel.Attachments[i].ReleaseID = rel.ID
-		}
+		if len(rel.Attachments) > 0 {
+			for i := range rel.Attachments {
+				rel.Attachments[i].ReleaseID = rel.ID
+			}
 
-		if _, err := sess.NoAutoTime().Insert(rel.Attachments); err != nil {
-			return err
+			if _, err := sess.NoAutoTime().Insert(rel.Attachments); err != nil {
+				return err
+			}
 		}
 	}
 
-	return sess.Commit()
+	return committer.Commit()
+}
+
+func migratedIssueCond(tp structs.GitServiceType) builder.Cond {
+	return builder.In("issue_id",
+		builder.Select("issue.id").
+			From("issue").
+			InnerJoin("repository", "issue.repo_id = repository.id").
+			Where(builder.Eq{
+				"repository.original_service_type": tp,
+			}),
+	)
+}
+
+// UpdateReviewsMigrationsByType updates reviews' migrations information via given git service type and original id and poster id
+func UpdateReviewsMigrationsByType(tp structs.GitServiceType, originalAuthorID string, posterID int64) error {
+	_, err := db.GetEngine(db.DefaultContext).Table("review").
+		Where("original_author_id = ?", originalAuthorID).
+		And(migratedIssueCond(tp)).
+		Update(map[string]interface{}{
+			"reviewer_id":        posterID,
+			"original_author":    "",
+			"original_author_id": 0,
+		})
+	return err
+}
+
+// UpdateMigrationsByType updates all migrated repositories' posterid from gitServiceType to replace originalAuthorID to posterID
+func UpdateMigrationsByType(tp structs.GitServiceType, externalUserID string, userID int64) error {
+	if err := UpdateIssuesMigrationsByType(tp, externalUserID, userID); err != nil {
+		return err
+	}
+
+	if err := UpdateCommentsMigrationsByType(tp, externalUserID, userID); err != nil {
+		return err
+	}
+
+	if err := UpdateReleasesMigrationsByType(tp, externalUserID, userID); err != nil {
+		return err
+	}
+
+	if err := UpdateReactionsMigrationsByType(tp, externalUserID, userID); err != nil {
+		return err
+	}
+	return UpdateReviewsMigrationsByType(tp, externalUserID, userID)
 }

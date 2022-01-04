@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/markbates/goth"
-	"golang.org/x/oauth2"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/markbates/goth"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -53,8 +55,8 @@ type Provider struct {
 	Secret       string
 	CallbackURL  string
 	HTTPClient   *http.Client
+	OpenIDConfig *OpenIDConfig
 	config       *oauth2.Config
-	openIDConfig *OpenIDConfig
 	providerName string
 
 	UserIdClaims    []string
@@ -73,7 +75,28 @@ type OpenIDConfig struct {
 	AuthEndpoint     string `json:"authorization_endpoint"`
 	TokenEndpoint    string `json:"token_endpoint"`
 	UserInfoEndpoint string `json:"userinfo_endpoint"`
-	Issuer           string `json:"issuer"`
+
+	// If OpenID discovery is enabled, the end_session_endpoint field can optionally be provided
+	// in the discovery endpoint response according to OpenID spec. See:
+	// https://openid.net/specs/openid-connect-session-1_0-17.html#OPMetadata
+	EndSessionEndpoint string `json:"end_session_endpoint, omitempty"`
+	Issuer             string `json:"issuer"`
+}
+
+type RefreshTokenResponse struct {
+	AccessToken string `json:"access_token"`
+
+	// The OpenID spec defines the ID token as an optional response field in the
+	// refresh token flow. As a result, a new ID token may not be returned in a successful
+	// response.
+	// See more: https://openid.net/specs/openid-connect-core-1_0.html#RefreshingAccessToken
+	IdToken string `json:"id_token, omitempty"`
+
+	// The OAuth spec defines the refresh token as an optional response field in the
+	// refresh token flow. As a result, a new refresh token may not be returned in a successful
+	// response.
+	//See more: https://www.oauth.com/oauth2-servers/making-authenticated-requests/refreshing-an-access-token/
+	RefreshToken string `json:"refresh_token,omitempty"`
 }
 
 // New creates a new OpenID Connect provider, and sets up important connection details.
@@ -105,7 +128,7 @@ func New(clientKey, secret, callbackURL, openIDAutoDiscoveryURL string, scopes .
 	if err != nil {
 		return nil, err
 	}
-	p.openIDConfig = openIDConfig
+	p.OpenIDConfig = openIDConfig
 
 	p.config = newConfig(p, scopes, openIDConfig)
 	return p, nil
@@ -173,6 +196,7 @@ func (p *Provider) FetchUser(session goth.Session) (goth.User, error) {
 		RefreshToken: sess.RefreshToken,
 		ExpiresAt:    expiresAt,
 		RawData:      claims,
+		IDToken:      sess.IDToken,
 	}
 
 	p.userFromClaims(claims, &user)
@@ -195,6 +219,49 @@ func (p *Provider) RefreshToken(refreshToken string) (*oauth2.Token, error) {
 	return newToken, err
 }
 
+// The ID token is a fundamental part of the OpenID connect refresh token flow but is not part of the OAuth flow.
+// The existing RefreshToken function leverages the OAuth library's refresh token mechanism, ignoring the refreshed
+// ID token. As a result, a new function needs to be exposed (rather than changing the existing function, for backwards
+// compatibility purposes) that also returns the id_token in the OpenID refresh token flow API response
+// Learn more about ID tokens: https://openid.net/specs/openid-connect-core-1_0.html#IDToken
+func (p *Provider) RefreshTokenWithIDToken(refreshToken string) (*RefreshTokenResponse, error) {
+	urlValues := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {p.ClientKey},
+		"client_secret": {p.Secret},
+	}
+	req, err := http.NewRequest("POST", p.OpenIDConfig.TokenEndpoint, strings.NewReader(urlValues.Encode()))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := p.Client().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Non-200 response from RefreshToken: %d, WWW-Authenticate=%s", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body.Close()
+
+	refreshTokenResponse := &RefreshTokenResponse{}
+
+	err = json.Unmarshal(body, refreshTokenResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return refreshTokenResponse, nil
+}
+
 // validate according to standard, returns expiry
 // http://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation
 func (p *Provider) validateClaims(claims map[string]interface{}) (time.Time, error) {
@@ -214,7 +281,7 @@ func (p *Provider) validateClaims(claims map[string]interface{}) (time.Time, err
 	}
 
 	issuer := getClaimValue(claims, []string{issuerClaim})
-	if issuer != p.openIDConfig.Issuer {
+	if issuer != p.OpenIDConfig.Issuer {
 		return time.Time{}, errors.New("issuer in token does not match issuer in OpenIDConfig discovery")
 	}
 
@@ -243,11 +310,11 @@ func (p *Provider) userFromClaims(claims map[string]interface{}, user *goth.User
 
 func (p *Provider) getUserInfo(accessToken string, claims map[string]interface{}) error {
 	// skip if there is no UserInfoEndpoint or is explicitly disabled
-	if p.openIDConfig.UserInfoEndpoint == "" || p.SkipUserInfoRequest {
+	if p.OpenIDConfig.UserInfoEndpoint == "" || p.SkipUserInfoRequest {
 		return nil
 	}
 
-	userInfoClaims, err := p.fetchUserInfo(p.openIDConfig.UserInfoEndpoint, accessToken)
+	userInfoClaims, err := p.fetchUserInfo(p.OpenIDConfig.UserInfoEndpoint, accessToken)
 	if err != nil {
 		return err
 	}
@@ -391,13 +458,8 @@ func decodeJWT(jwt string) (map[string]interface{}, error) {
 		return nil, errors.New("jws: invalid token received, not all parts available")
 	}
 
-	// Re-pad, if needed
-	encodedPayload := jwtParts[1]
-	if l := len(encodedPayload) % 4; l != 0 {
-		encodedPayload += strings.Repeat("=", 4-l)
-	}
+	decodedPayload, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(jwtParts[1])
 
-	decodedPayload, err := base64.StdEncoding.DecodeString(encodedPayload)
 	if err != nil {
 		return nil, err
 	}

@@ -1,5 +1,5 @@
 {{template "base/head" .}}
-<div class="user settings applications">
+<div class="page-content user settings applications">
 	{{template "user/settings/navbar" .}}
 	<div class="ui container">
 		{{template "base/alert" .}}
@@ -7,7 +7,6 @@
 			{{.i18n.Tr "settings.edit_oauth2_application"}}
 		</h4>
 		<div class="ui attached segment">
-			{{template "base/alert" .}}
 			<p>{{.i18n.Tr "settings.oauth2_application_create_description"}}</p>
 		</div>
 		<div class="ui attached segment form ignore-dirty">
@@ -30,14 +29,14 @@
 			<div class="item">
 				<!-- TODO add regenerate secret functionality */ -->
 				{{.i18n.Tr "settings.oauth2_regenerate_secret_hint"}}
-				<form class="ui form ignore-dirty" action="{{$.AppSubURL}}/user/settings/applications/oauth2/{{.App.ID}}/regenerate_secret" method="post">
+				<form class="ui form ignore-dirty" action="{{AppSubUrl}}/user/settings/applications/oauth2/{{.App.ID}}/regenerate_secret" method="post">
 					{{.CsrfTokenHtml}}
 					<a href="#" onclick="event.target.parentNode.submit()">{{.i18n.Tr "settings.oauth2_regenerate_secret"}}</a>
 				</form>
 			</div>
 		</div>
 		<div class="ui attached bottom segment">
-			<form class="ui form ignore-dirty" action="{{$.AppSubURL}}/user/settings/applications/oauth2/{{.App.ID}}" method="post">
+			<form class="ui form ignore-dirty" action="{{AppSubUrl}}/user/settings/applications/oauth2/{{.App.ID}}" method="post">
 				{{.CsrfTokenHtml}}
 				<div class="field {{if .Err_AppName}}error{{end}}">
 					<label for="application-name">{{.i18n.Tr "settings.oauth2_application_name"}}</label>
@@ -57,7 +56,7 @@
 
 <div class="ui small basic delete modal" id="delete-oauth2-application">
 	<div class="ui icon header">
-		<i class="trash icon"></i>
+		{{svg "octicon-trash"}}
 		{{.i18n.Tr "settings.remove_oauth2_application"}}
 	</div>
 	<div class="content">

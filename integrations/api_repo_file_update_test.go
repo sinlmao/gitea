@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	repo_model "code.gitea.io/gitea/models/repo"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/setting"
@@ -35,8 +37,8 @@ func getUpdateFileOptions() *api.UpdateFileOptions {
 					Email: "johndoe@example.com",
 				},
 				Committer: api.Identity{
-					Name:  "Jane Doe",
-					Email: "janedoe@example.com",
+					Name:  "Anne Doe",
+					Email: "annedoe@example.com",
 				},
 			},
 			SHA: "103ff9234cefeee5ec5361d22b49fbb04d385885",
@@ -80,21 +82,21 @@ func getExpectedFileResponseForUpdate(commitID, treePath string) *api.FileRespon
 			HTMLURL: setting.AppURL + "user2/repo1/commit/" + commitID,
 			Author: &api.CommitUser{
 				Identity: api.Identity{
-					Name:  "Jane Doe",
-					Email: "janedoe@example.com",
+					Name:  "John Doe",
+					Email: "johndoe@example.com",
 				},
 			},
 			Committer: &api.CommitUser{
 				Identity: api.Identity{
-					Name:  "John Doe",
-					Email: "johndoe@example.com",
+					Name:  "Anne Doe",
+					Email: "annedoe@example.com",
 				},
 			},
 			Message: "My update of README.md\n",
 		},
 		Verification: &api.PayloadCommitVerification{
 			Verified:  false,
-			Reason:    "unsigned",
+			Reason:    "gpg.error.not_signed_commit",
 			Signature: "",
 			Payload:   "",
 		},
@@ -103,18 +105,17 @@ func getExpectedFileResponseForUpdate(commitID, treePath string) *api.FileRespon
 
 func TestAPIUpdateFile(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
-		user2 := models.AssertExistsAndLoadBean(t, &models.User{ID: 2}).(*models.User)               // owner of the repo1 & repo16
-		user3 := models.AssertExistsAndLoadBean(t, &models.User{ID: 3}).(*models.User)               // owner of the repo3, is an org
-		user4 := models.AssertExistsAndLoadBean(t, &models.User{ID: 4}).(*models.User)               // owner of neither repos
-		repo1 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)   // public repo
-		repo3 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 3}).(*models.Repository)   // public repo
-		repo16 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 16}).(*models.Repository) // private repo
+		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2}).(*user_model.User)               // owner of the repo1 & repo16
+		user3 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 3}).(*user_model.User)               // owner of the repo3, is an org
+		user4 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 4}).(*user_model.User)               // owner of neither repos
+		repo1 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1}).(*repo_model.Repository)   // public repo
+		repo3 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 3}).(*repo_model.Repository)   // public repo
+		repo16 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 16}).(*repo_model.Repository) // private repo
 		fileID := 0
 
 		// Get user2's token
 		session := loginUser(t, user2.Name)
 		token2 := getTokenForLoggedInUser(t, session)
-		session = emptyTestSession(t)
 		// Get user4's token
 		session = loginUser(t, user4.Name)
 		token4 := getTokenForLoggedInUser(t, session)
@@ -143,6 +144,7 @@ func TestAPIUpdateFile(t *testing.T) {
 			assert.EqualValues(t, expectedFileResponse.Commit.HTMLURL, fileResponse.Commit.HTMLURL)
 			assert.EqualValues(t, expectedFileResponse.Commit.Author.Email, fileResponse.Commit.Author.Email)
 			assert.EqualValues(t, expectedFileResponse.Commit.Author.Name, fileResponse.Commit.Author.Name)
+			gitRepo.Close()
 		}
 
 		// Test updating a file in a new branch
@@ -207,7 +209,7 @@ func TestAPIUpdateFile(t *testing.T) {
 		updateFileOptions.SHA = "badsha"
 		url = fmt.Sprintf("/api/v1/repos/%s/%s/contents/%s?token=%s", user2.Name, repo1.Name, treePath, token2)
 		req = NewRequestWithJSON(t, "PUT", url, &updateFileOptions)
-		resp = session.MakeRequest(t, req, http.StatusInternalServerError)
+		resp = session.MakeRequest(t, req, http.StatusUnprocessableEntity)
 		expectedAPIError := context.APIError{
 			Message: "sha does not match [given: " + updateFileOptions.SHA + ", expected: " + correctSHA + "]",
 			URL:     setting.API.SwaggerURL,

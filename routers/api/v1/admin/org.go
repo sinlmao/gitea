@@ -6,15 +6,21 @@
 package admin
 
 import (
+	"net/http"
+
 	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/db"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/convert"
 	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/convert"
+	"code.gitea.io/gitea/modules/web"
 	"code.gitea.io/gitea/routers/api/v1/user"
+	"code.gitea.io/gitea/routers/api/v1/utils"
 )
 
 // CreateOrg api for create organization
-func CreateOrg(ctx *context.APIContext, form api.CreateOrgOption) {
+func CreateOrg(ctx *context.APIContext) {
 	// swagger:operation POST /admin/users/{username}/orgs admin adminCreateOrg
 	// ---
 	// summary: Create an organization
@@ -39,6 +45,7 @@ func CreateOrg(ctx *context.APIContext, form api.CreateOrgOption) {
 	//     "$ref": "#/responses/forbidden"
 	//   "422":
 	//     "$ref": "#/responses/validationError"
+	form := web.GetForm(ctx).(*api.CreateOrgOption)
 	u := user.GetUserByParams(ctx)
 	if ctx.Written() {
 		return
@@ -49,29 +56,30 @@ func CreateOrg(ctx *context.APIContext, form api.CreateOrgOption) {
 		visibility = api.VisibilityModes[form.Visibility]
 	}
 
-	org := &models.User{
+	org := &models.Organization{
 		Name:        form.UserName,
 		FullName:    form.FullName,
 		Description: form.Description,
 		Website:     form.Website,
 		Location:    form.Location,
 		IsActive:    true,
-		Type:        models.UserTypeOrganization,
+		Type:        user_model.UserTypeOrganization,
 		Visibility:  visibility,
 	}
 
 	if err := models.CreateOrganization(org, u); err != nil {
-		if models.IsErrUserAlreadyExist(err) ||
-			models.IsErrNameReserved(err) ||
-			models.IsErrNamePatternNotAllowed(err) {
-			ctx.Error(422, "", err)
+		if user_model.IsErrUserAlreadyExist(err) ||
+			db.IsErrNameReserved(err) ||
+			db.IsErrNameCharsNotAllowed(err) ||
+			db.IsErrNamePatternNotAllowed(err) {
+			ctx.Error(http.StatusUnprocessableEntity, "", err)
 		} else {
-			ctx.Error(500, "CreateOrganization", err)
+			ctx.Error(http.StatusInternalServerError, "CreateOrganization", err)
 		}
 		return
 	}
 
-	ctx.JSON(201, convert.ToOrganization(org))
+	ctx.JSON(http.StatusCreated, convert.ToOrganization(org))
 }
 
 //GetAllOrgs API for getting information of all the organizations
@@ -88,27 +96,33 @@ func GetAllOrgs(ctx *context.APIContext) {
 	//   type: integer
 	// - name: limit
 	//   in: query
-	//   description: page size of results, maximum page size is 50
+	//   description: page size of results
 	//   type: integer
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/OrganizationList"
 	//   "403":
 	//     "$ref": "#/responses/forbidden"
-	users, _, err := models.SearchUsers(&models.SearchUserOptions{
-		Type:     models.UserTypeOrganization,
-		OrderBy:  models.SearchOrderByAlphabetically,
-		Page:     ctx.QueryInt("page"),
-		PageSize: convert.ToCorrectPageSize(ctx.QueryInt("limit")),
-		Private:  true,
+
+	listOptions := utils.GetListOptions(ctx)
+
+	users, maxResults, err := user_model.SearchUsers(&user_model.SearchUserOptions{
+		Actor:       ctx.User,
+		Type:        user_model.UserTypeOrganization,
+		OrderBy:     db.SearchOrderByAlphabetically,
+		ListOptions: listOptions,
+		Visible:     []api.VisibleType{api.VisibleTypePublic, api.VisibleTypeLimited, api.VisibleTypePrivate},
 	})
 	if err != nil {
-		ctx.Error(500, "SearchOrganizations", err)
+		ctx.Error(http.StatusInternalServerError, "SearchOrganizations", err)
 		return
 	}
 	orgs := make([]*api.Organization, len(users))
 	for i := range users {
-		orgs[i] = convert.ToOrganization(users[i])
+		orgs[i] = convert.ToOrganization(models.OrgFromUser(users[i]))
 	}
-	ctx.JSON(200, &orgs)
+
+	ctx.SetLinkHeader(int(maxResults), listOptions.PageSize)
+	ctx.SetTotalCountHeader(maxResults)
+	ctx.JSON(http.StatusOK, &orgs)
 }

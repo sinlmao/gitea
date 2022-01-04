@@ -11,8 +11,11 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"code.gitea.io/gitea/models"
+	repo_model "code.gitea.io/gitea/models/repo"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/context"
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/setting"
@@ -30,12 +33,16 @@ func getCreateFileOptions() api.CreateFileOptions {
 			NewBranchName: "master",
 			Message:       "Making this new file new/file.txt",
 			Author: api.Identity{
+				Name:  "Anne Doe",
+				Email: "annedoe@example.com",
+			},
+			Committer: api.Identity{
 				Name:  "John Doe",
 				Email: "johndoe@example.com",
 			},
-			Committer: api.Identity{
-				Name:  "Jane Doe",
-				Email: "janedoe@example.com",
+			Dates: api.CommitDateOptions{
+				Author:    time.Unix(946684810, 0),
+				Committer: time.Unix(978307190, 0),
 			},
 		},
 		Content: contentEncoded,
@@ -77,41 +84,72 @@ func getExpectedFileResponseForCreate(commitID, treePath string) *api.FileRespon
 			HTMLURL: setting.AppURL + "user2/repo1/commit/" + commitID,
 			Author: &api.CommitUser{
 				Identity: api.Identity{
-					Name:  "Jane Doe",
-					Email: "janedoe@example.com",
+					Name:  "Anne Doe",
+					Email: "annedoe@example.com",
 				},
+				Date: "2000-01-01T00:00:10Z",
 			},
 			Committer: &api.CommitUser{
 				Identity: api.Identity{
 					Name:  "John Doe",
 					Email: "johndoe@example.com",
 				},
+				Date: "2000-12-31T23:59:50Z",
 			},
 			Message: "Updates README.md\n",
 		},
 		Verification: &api.PayloadCommitVerification{
 			Verified:  false,
-			Reason:    "unsigned",
+			Reason:    "gpg.error.not_signed_commit",
 			Signature: "",
 			Payload:   "",
 		},
 	}
 }
 
+func BenchmarkAPICreateFileSmall(b *testing.B) {
+	onGiteaRunTB(b, func(t testing.TB, u *url.URL) {
+		b := t.(*testing.B)
+		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2}).(*user_model.User)             // owner of the repo1 & repo16
+		repo1 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1}).(*repo_model.Repository) // public repo
+
+		for n := 0; n < b.N; n++ {
+			treePath := fmt.Sprintf("update/file%d.txt", n)
+			createFileInBranch(user2, repo1, treePath, repo1.DefaultBranch, treePath)
+		}
+	})
+}
+
+func BenchmarkAPICreateFileMedium(b *testing.B) {
+	data := make([]byte, 10*1024*1024)
+
+	onGiteaRunTB(b, func(t testing.TB, u *url.URL) {
+		b := t.(*testing.B)
+		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2}).(*user_model.User)             // owner of the repo1 & repo16
+		repo1 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1}).(*repo_model.Repository) // public repo
+
+		b.ResetTimer()
+		for n := 0; n < b.N; n++ {
+			treePath := fmt.Sprintf("update/file%d.txt", n)
+			copy(data, treePath)
+			createFileInBranch(user2, repo1, treePath, repo1.DefaultBranch, treePath)
+		}
+	})
+}
+
 func TestAPICreateFile(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
-		user2 := models.AssertExistsAndLoadBean(t, &models.User{ID: 2}).(*models.User)               // owner of the repo1 & repo16
-		user3 := models.AssertExistsAndLoadBean(t, &models.User{ID: 3}).(*models.User)               // owner of the repo3, is an org
-		user4 := models.AssertExistsAndLoadBean(t, &models.User{ID: 4}).(*models.User)               // owner of neither repos
-		repo1 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)   // public repo
-		repo3 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 3}).(*models.Repository)   // public repo
-		repo16 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 16}).(*models.Repository) // private repo
+		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2}).(*user_model.User)               // owner of the repo1 & repo16
+		user3 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 3}).(*user_model.User)               // owner of the repo3, is an org
+		user4 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 4}).(*user_model.User)               // owner of neither repos
+		repo1 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1}).(*repo_model.Repository)   // public repo
+		repo3 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 3}).(*repo_model.Repository)   // public repo
+		repo16 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 16}).(*repo_model.Repository) // private repo
 		fileID := 0
 
 		// Get user2's token
 		session := loginUser(t, user2.Name)
 		token2 := getTokenForLoggedInUser(t, session)
-		session = emptyTestSession(t)
 		// Get user4's token
 		session = loginUser(t, user4.Name)
 		token4 := getTokenForLoggedInUser(t, session)
@@ -139,6 +177,11 @@ func TestAPICreateFile(t *testing.T) {
 			assert.EqualValues(t, expectedFileResponse.Commit.HTMLURL, fileResponse.Commit.HTMLURL)
 			assert.EqualValues(t, expectedFileResponse.Commit.Author.Email, fileResponse.Commit.Author.Email)
 			assert.EqualValues(t, expectedFileResponse.Commit.Author.Name, fileResponse.Commit.Author.Name)
+			assert.EqualValues(t, expectedFileResponse.Commit.Author.Date, fileResponse.Commit.Author.Date)
+			assert.EqualValues(t, expectedFileResponse.Commit.Committer.Email, fileResponse.Commit.Committer.Email)
+			assert.EqualValues(t, expectedFileResponse.Commit.Committer.Name, fileResponse.Commit.Committer.Name)
+			assert.EqualValues(t, expectedFileResponse.Commit.Committer.Date, fileResponse.Commit.Committer.Date)
+			gitRepo.Close()
 		}
 
 		// Test creating a file in a new branch
@@ -177,7 +220,7 @@ func TestAPICreateFile(t *testing.T) {
 		treePath = "README.md"
 		url = fmt.Sprintf("/api/v1/repos/%s/%s/contents/%s?token=%s", user2.Name, repo1.Name, treePath, token2)
 		req = NewRequestWithJSON(t, "POST", url, &createFileOptions)
-		resp = session.MakeRequest(t, req, http.StatusInternalServerError)
+		resp = session.MakeRequest(t, req, http.StatusUnprocessableEntity)
 		expectedAPIError := context.APIError{
 			Message: "repository file already exists [path: " + treePath + "]",
 			URL:     setting.API.SwaggerURL,

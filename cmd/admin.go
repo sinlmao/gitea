@@ -6,17 +6,29 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/auth/oauth2"
-	"code.gitea.io/gitea/modules/generate"
+	asymkey_model "code.gitea.io/gitea/models/asymkey"
+	"code.gitea.io/gitea/models/auth"
+	"code.gitea.io/gitea/models/db"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/git"
+	"code.gitea.io/gitea/modules/graceful"
 	"code.gitea.io/gitea/modules/log"
+	pwd "code.gitea.io/gitea/modules/password"
+	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/storage"
+	auth_service "code.gitea.io/gitea/services/auth"
+	"code.gitea.io/gitea/services/auth/source/oauth2"
+	repo_service "code.gitea.io/gitea/services/repository"
+	user_service "code.gitea.io/gitea/services/user"
 
 	"github.com/urfave/cli"
 )
@@ -27,16 +39,39 @@ var (
 		Name:  "admin",
 		Usage: "Command line interface to perform common administrative operations",
 		Subcommands: []cli.Command{
-			subcmdCreateUser,
-			subcmdChangePassword,
+			subcmdUser,
 			subcmdRepoSyncReleases,
 			subcmdRegenerate,
 			subcmdAuth,
+			subcmdSendMail,
 		},
 	}
 
-	subcmdCreateUser = cli.Command{
-		Name:   "create-user",
+	subcmdUser = cli.Command{
+		Name:  "user",
+		Usage: "Modify users",
+		Subcommands: []cli.Command{
+			microcmdUserCreate,
+			microcmdUserList,
+			microcmdUserChangePassword,
+			microcmdUserDelete,
+		},
+	}
+
+	microcmdUserList = cli.Command{
+		Name:   "list",
+		Usage:  "List users",
+		Action: runListUsers,
+		Flags: []cli.Flag{
+			cli.BoolFlag{
+				Name:  "admin",
+				Usage: "List only admin users",
+			},
+		},
+	}
+
+	microcmdUserCreate = cli.Command{
+		Name:   "create",
 		Usage:  "Create a new user in database",
 		Action: runCreateUser,
 		Flags: []cli.Flag{
@@ -66,7 +101,7 @@ var (
 			},
 			cli.BoolFlag{
 				Name:  "must-change-password",
-				Usage: "Force the user to change his/her password after initial login",
+				Usage: "Set this option to false to prevent forcing the user to change their password after initial login, (Default: true)",
 			},
 			cli.IntFlag{
 				Name:  "random-password-length",
@@ -80,7 +115,7 @@ var (
 		},
 	}
 
-	subcmdChangePassword = cli.Command{
+	microcmdUserChangePassword = cli.Command{
 		Name:   "change-password",
 		Usage:  "Change a user's password",
 		Action: runChangePassword,
@@ -96,6 +131,26 @@ var (
 				Usage: "New password to set for user",
 			},
 		},
+	}
+
+	microcmdUserDelete = cli.Command{
+		Name:  "delete",
+		Usage: "Delete specific user by id, name or email",
+		Flags: []cli.Flag{
+			cli.Int64Flag{
+				Name:  "id",
+				Usage: "ID of user of the user to delete",
+			},
+			cli.StringFlag{
+				Name:  "username,u",
+				Usage: "Username of the user to delete",
+			},
+			cli.StringFlag{
+				Name:  "email,e",
+				Usage: "Email of the user to delete",
+			},
+		},
+		Action: runDeleteUser,
 	}
 
 	subcmdRepoSyncReleases = cli.Command{
@@ -144,6 +199,32 @@ var (
 		Name:   "list",
 		Usage:  "List auth sources",
 		Action: runListAuth,
+		Flags: []cli.Flag{
+			cli.IntFlag{
+				Name:  "min-width",
+				Usage: "Minimal cell width including any padding for the formatted table",
+				Value: 0,
+			},
+			cli.IntFlag{
+				Name:  "tab-width",
+				Usage: "width of tab characters in formatted table (equivalent number of spaces)",
+				Value: 8,
+			},
+			cli.IntFlag{
+				Name:  "padding",
+				Usage: "padding added to a cell before computing its width",
+				Value: 1,
+			},
+			cli.StringFlag{
+				Name:  "pad-char",
+				Usage: `ASCII char used for padding if padchar == '\\t', the Writer will assume that the width of a '\\t' in the formatted output is tabwidth, and cells are left-aligned independent of align_left (for correct-looking results, tabwidth must correspond to the tab width in the viewer displaying the result)`,
+				Value: "\t",
+			},
+			cli.BoolFlag{
+				Name:  "vertical-bars",
+				Usage: "Set to true to print vertical bars between columns",
+			},
+		},
 	}
 
 	idFlag = cli.Int64Flag{
@@ -154,6 +235,7 @@ var (
 	microcmdAuthDelete = cli.Command{
 		Name:   "delete",
 		Usage:  "Delete specific auth source",
+		Flags:  []cli.Flag{idFlag},
 		Action: runDeleteAuth,
 	}
 
@@ -208,6 +290,45 @@ var (
 			Value: "",
 			Usage: "Use a custom Email URL (option for GitHub)",
 		},
+		cli.StringFlag{
+			Name:  "icon-url",
+			Value: "",
+			Usage: "Custom icon URL for OAuth2 login source",
+		},
+		cli.BoolFlag{
+			Name:  "skip-local-2fa",
+			Usage: "Set to true to skip local 2fa for users authenticated by this source",
+		},
+		cli.StringSliceFlag{
+			Name:  "scopes",
+			Value: nil,
+			Usage: "Scopes to request when to authenticate against this OAuth2 source",
+		},
+		cli.StringFlag{
+			Name:  "required-claim-name",
+			Value: "",
+			Usage: "Claim name that has to be set to allow users to login with this source",
+		},
+		cli.StringFlag{
+			Name:  "required-claim-value",
+			Value: "",
+			Usage: "Claim value that has to be set to allow users to login with this source",
+		},
+		cli.StringFlag{
+			Name:  "group-claim-name",
+			Value: "",
+			Usage: "Claim name providing group names for this source",
+		},
+		cli.StringFlag{
+			Name:  "admin-group",
+			Value: "",
+			Usage: "Group Claim value for administrator users",
+		},
+		cli.StringFlag{
+			Name:  "restricted-group",
+			Value: "",
+			Usage: "Group Claim value for restricted users",
+		},
 	}
 
 	microcmdAuthUpdateOauth = cli.Command{
@@ -223,6 +344,28 @@ var (
 		Action: runAddOauth,
 		Flags:  oauthCLIFlags,
 	}
+
+	subcmdSendMail = cli.Command{
+		Name:   "sendmail",
+		Usage:  "Send a message to all users",
+		Action: runSendMail,
+		Flags: []cli.Flag{
+			cli.StringFlag{
+				Name:  "title",
+				Usage: `a title of a message`,
+				Value: "",
+			},
+			cli.StringFlag{
+				Name:  "content",
+				Usage: "a content of a message",
+				Value: "",
+			},
+			cli.BoolFlag{
+				Name:  "force,f",
+				Usage: "A flag to bypass a confirmation step",
+			},
+		},
+	}
 )
 
 func runChangePassword(c *cli.Context) error {
@@ -230,20 +373,36 @@ func runChangePassword(c *cli.Context) error {
 		return err
 	}
 
-	if err := initDB(); err != nil {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
+	if len(c.String("password")) < setting.MinPasswordLength {
+		return fmt.Errorf("Password is not long enough. Needs to be at least %d", setting.MinPasswordLength)
+	}
 
-	uname := c.String("username")
-	user, err := models.GetUserByName(uname)
+	if !pwd.IsComplexEnough(c.String("password")) {
+		return errors.New("Password does not meet complexity requirements")
+	}
+	pwned, err := pwd.IsPwned(context.Background(), c.String("password"))
 	if err != nil {
 		return err
 	}
-	if user.Salt, err = models.GetUserSalt(); err != nil {
+	if pwned {
+		return errors.New("The password you chose is on a list of stolen passwords previously exposed in public data breaches. Please try again with a different password.\nFor more details, see https://haveibeenpwned.com/Passwords")
+	}
+	uname := c.String("username")
+	user, err := user_model.GetUserByName(uname)
+	if err != nil {
 		return err
 	}
-	user.HashPassword(c.String("password"))
-	if err := models.UpdateUserCols(user, "passwd", "salt"); err != nil {
+	if err = user.SetPassword(c.String("password")); err != nil {
+		return err
+	}
+
+	if err = user_model.UpdateUserCols(db.DefaultContext, user, "passwd", "passwd_hash_algo", "salt"); err != nil {
 		return err
 	}
 
@@ -275,24 +434,25 @@ func runCreateUser(c *cli.Context) error {
 		fmt.Fprintf(os.Stderr, "--name flag is deprecated. Use --username instead.\n")
 	}
 
-	var password string
+	ctx, cancel := installSignals()
+	defer cancel()
 
+	if err := initDB(ctx); err != nil {
+		return err
+	}
+
+	var password string
 	if c.IsSet("password") {
 		password = c.String("password")
 	} else if c.IsSet("random-password") {
 		var err error
-		password, err = generate.GetRandomString(c.Int("random-password-length"))
+		password, err = pwd.Generate(c.Int("random-password-length"))
 		if err != nil {
 			return err
 		}
-
 		fmt.Printf("generated random password is '%s'\n", password)
 	} else {
 		return errors.New("must set either password or random-password flag")
-	}
-
-	if err := initDB(); err != nil {
-		return err
 	}
 
 	// always default to true
@@ -300,7 +460,7 @@ func runCreateUser(c *cli.Context) error {
 
 	// If this is the first user being created.
 	// Take it as the admin and don't force a password update.
-	if n := models.CountUsers(); n == 0 {
+	if n := user_model.CountUsers(); n == 0 {
 		changePassword = false
 	}
 
@@ -308,7 +468,7 @@ func runCreateUser(c *cli.Context) error {
 		changePassword = c.Bool("must-change-password")
 	}
 
-	u := &models.User{
+	u := &user_model.User{
 		Name:               username,
 		Email:              c.String("email"),
 		Passwd:             password,
@@ -318,7 +478,7 @@ func runCreateUser(c *cli.Context) error {
 		Theme:              setting.UI.DefaultTheme,
 	}
 
-	if err := models.CreateUser(u); err != nil {
+	if err := user_model.CreateUser(u); err != nil {
 		return fmt.Errorf("CreateUser: %v", err)
 	}
 
@@ -339,17 +499,97 @@ func runCreateUser(c *cli.Context) error {
 	return nil
 }
 
-func runRepoSyncReleases(c *cli.Context) error {
-	if err := initDB(); err != nil {
+func runListUsers(c *cli.Context) error {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
+		return err
+	}
+
+	users, err := user_model.GetAllUsers()
+
+	if err != nil {
+		return err
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 5, 0, 1, ' ', 0)
+
+	if c.IsSet("admin") {
+		fmt.Fprintf(w, "ID\tUsername\tEmail\tIsActive\n")
+		for _, u := range users {
+			if u.IsAdmin {
+				fmt.Fprintf(w, "%d\t%s\t%s\t%t\n", u.ID, u.Name, u.Email, u.IsActive)
+			}
+		}
+	} else {
+		fmt.Fprintf(w, "ID\tUsername\tEmail\tIsActive\tIsAdmin\n")
+		for _, u := range users {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%t\t%t\n", u.ID, u.Name, u.Email, u.IsActive, u.IsAdmin)
+		}
+
+	}
+
+	w.Flush()
+	return nil
+
+}
+
+func runDeleteUser(c *cli.Context) error {
+	if !c.IsSet("id") && !c.IsSet("username") && !c.IsSet("email") {
+		return fmt.Errorf("You must provide the id, username or email of a user to delete")
+	}
+
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
+		return err
+	}
+
+	if err := storage.Init(); err != nil {
+		return err
+	}
+
+	var err error
+	var user *user_model.User
+	if c.IsSet("email") {
+		user, err = user_model.GetUserByEmail(c.String("email"))
+	} else if c.IsSet("username") {
+		user, err = user_model.GetUserByName(c.String("username"))
+	} else {
+		user, err = user_model.GetUserByID(c.Int64("id"))
+	}
+	if err != nil {
+		return err
+	}
+	if c.IsSet("username") && user.LowerName != strings.ToLower(strings.TrimSpace(c.String("username"))) {
+		return fmt.Errorf("The user %s who has email %s does not match the provided username %s", user.Name, c.String("email"), c.String("username"))
+	}
+
+	if c.IsSet("id") && user.ID != c.Int64("id") {
+		return fmt.Errorf("The user %s does not match the provided id %d", user.Name, c.Int64("id"))
+	}
+
+	return user_service.DeleteUser(user)
+}
+
+func runRepoSyncReleases(_ *cli.Context) error {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
 
 	log.Trace("Synchronizing repository releases (this may take a while)")
 	for page := 1; ; page++ {
 		repos, count, err := models.SearchRepositoryByName(&models.SearchRepoOptions{
-			Page:     page,
-			PageSize: models.RepositoryListDefaultPageSize,
-			Private:  true,
+			ListOptions: db.ListOptions{
+				PageSize: models.RepositoryListDefaultPageSize,
+				Page:     page,
+			},
+			Private: true,
 		})
 		if err != nil {
 			return fmt.Errorf("SearchRepositoryByName: %v", err)
@@ -372,19 +612,22 @@ func runRepoSyncReleases(c *cli.Context) error {
 			}
 			log.Trace(" currentNumReleases is %d, running SyncReleasesWithTags", oldnum)
 
-			if err = models.SyncReleasesWithTags(repo, gitRepo); err != nil {
+			if err = repo_module.SyncReleasesWithTags(repo, gitRepo); err != nil {
 				log.Warn(" SyncReleasesWithTags: %v", err)
+				gitRepo.Close()
 				continue
 			}
 
 			count, err = getReleaseCount(repo.ID)
 			if err != nil {
 				log.Warn(" GetReleaseCountByRepoID: %v", err)
+				gitRepo.Close()
 				continue
 			}
 
 			log.Trace(" repo %s releases synchronized to tags: from %d to %d",
 				repo.FullName(), oldnum, count)
+			gitRepo.Close()
 		}
 	}
 
@@ -400,21 +643,27 @@ func getReleaseCount(id int64) (int64, error) {
 	)
 }
 
-func runRegenerateHooks(c *cli.Context) error {
-	if err := initDB(); err != nil {
+func runRegenerateHooks(_ *cli.Context) error {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
-	return models.SyncRepositoryHooks()
+	return repo_service.SyncRepositoryHooks(graceful.GetManager().ShutdownContext())
 }
 
-func runRegenerateKeys(c *cli.Context) error {
-	if err := initDB(); err != nil {
+func runRegenerateKeys(_ *cli.Context) error {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
-	return models.RewriteAllPublicKeys()
+	return asymkey_model.RewriteAllPublicKeys()
 }
 
-func parseOAuth2Config(c *cli.Context) *models.OAuth2Config {
+func parseOAuth2Config(c *cli.Context) *oauth2.Source {
 	var customURLMapping *oauth2.CustomURLMapping
 	if c.IsSet("use-custom-urls") {
 		customURLMapping = &oauth2.CustomURLMapping{
@@ -426,25 +675,36 @@ func parseOAuth2Config(c *cli.Context) *models.OAuth2Config {
 	} else {
 		customURLMapping = nil
 	}
-	return &models.OAuth2Config{
+	return &oauth2.Source{
 		Provider:                      c.String("provider"),
 		ClientID:                      c.String("key"),
 		ClientSecret:                  c.String("secret"),
 		OpenIDConnectAutoDiscoveryURL: c.String("auto-discover-url"),
 		CustomURLMapping:              customURLMapping,
+		IconURL:                       c.String("icon-url"),
+		SkipLocalTwoFA:                c.Bool("skip-local-2fa"),
+		Scopes:                        c.StringSlice("scopes"),
+		RequiredClaimName:             c.String("required-claim-name"),
+		RequiredClaimValue:            c.String("required-claim-value"),
+		GroupClaimName:                c.String("group-claim-name"),
+		AdminGroup:                    c.String("admin-group"),
+		RestrictedGroup:               c.String("restricted-group"),
 	}
 }
 
 func runAddOauth(c *cli.Context) error {
-	if err := initDB(); err != nil {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
 
-	return models.CreateLoginSource(&models.LoginSource{
-		Type:      models.LoginOAuth2,
-		Name:      c.String("name"),
-		IsActived: true,
-		Cfg:       parseOAuth2Config(c),
+	return auth.CreateSource(&auth.Source{
+		Type:     auth.OAuth2,
+		Name:     c.String("name"),
+		IsActive: true,
+		Cfg:      parseOAuth2Config(c),
 	})
 }
 
@@ -453,16 +713,19 @@ func runUpdateOauth(c *cli.Context) error {
 		return fmt.Errorf("--id flag is missing")
 	}
 
-	if err := initDB(); err != nil {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
 
-	source, err := models.GetLoginSourceByID(c.Int64("id"))
+	source, err := auth.GetSourceByID(c.Int64("id"))
 	if err != nil {
 		return err
 	}
 
-	oAuth2Config := source.OAuth2()
+	oAuth2Config := source.Cfg.(*oauth2.Source)
 
 	if c.IsSet("name") {
 		source.Name = c.String("name")
@@ -482,6 +745,32 @@ func runUpdateOauth(c *cli.Context) error {
 
 	if c.IsSet("auto-discover-url") {
 		oAuth2Config.OpenIDConnectAutoDiscoveryURL = c.String("auto-discover-url")
+	}
+
+	if c.IsSet("icon-url") {
+		oAuth2Config.IconURL = c.String("icon-url")
+	}
+
+	if c.IsSet("scopes") {
+		oAuth2Config.Scopes = c.StringSlice("scopes")
+	}
+
+	if c.IsSet("required-claim-name") {
+		oAuth2Config.RequiredClaimName = c.String("required-claim-name")
+
+	}
+	if c.IsSet("required-claim-value") {
+		oAuth2Config.RequiredClaimValue = c.String("required-claim-value")
+	}
+
+	if c.IsSet("group-claim-name") {
+		oAuth2Config.GroupClaimName = c.String("group-claim-name")
+	}
+	if c.IsSet("admin-group") {
+		oAuth2Config.AdminGroup = c.String("admin-group")
+	}
+	if c.IsSet("restricted-group") {
+		oAuth2Config.RestrictedGroup = c.String("restricted-group")
 	}
 
 	// update custom URL mapping
@@ -512,25 +801,38 @@ func runUpdateOauth(c *cli.Context) error {
 	oAuth2Config.CustomURLMapping = customURLMapping
 	source.Cfg = oAuth2Config
 
-	return models.UpdateSource(source)
+	return auth.UpdateSource(source)
 }
 
 func runListAuth(c *cli.Context) error {
-	if err := initDB(); err != nil {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
 
-	loginSources, err := models.LoginSources()
+	authSources, err := auth.Sources()
 
 	if err != nil {
 		return err
 	}
 
+	flags := tabwriter.AlignRight
+	if c.Bool("vertical-bars") {
+		flags |= tabwriter.Debug
+	}
+
+	padChar := byte('\t')
+	if len(c.String("pad-char")) > 0 {
+		padChar = c.String("pad-char")[0]
+	}
+
 	// loop through each source and print
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.AlignRight)
-	fmt.Fprintf(w, "ID\tName\tType\tEnabled")
-	for _, source := range loginSources {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%t", source.ID, source.Name, models.LoginNames[source.Type], source.IsActived)
+	w := tabwriter.NewWriter(os.Stdout, c.Int("min-width"), c.Int("tab-width"), c.Int("padding"), padChar, flags)
+	fmt.Fprintf(w, "ID\tName\tType\tEnabled\n")
+	for _, source := range authSources {
+		fmt.Fprintf(w, "%d\t%s\t%s\t%t\n", source.ID, source.Name, source.Type.String(), source.IsActive)
 	}
 	w.Flush()
 
@@ -542,14 +844,17 @@ func runDeleteAuth(c *cli.Context) error {
 		return fmt.Errorf("--id flag is missing")
 	}
 
-	if err := initDB(); err != nil {
+	ctx, cancel := installSignals()
+	defer cancel()
+
+	if err := initDB(ctx); err != nil {
 		return err
 	}
 
-	source, err := models.GetLoginSourceByID(c.Int64("id"))
+	source, err := auth.GetSourceByID(c.Int64("id"))
 	if err != nil {
 		return err
 	}
 
-	return models.DeleteSource(source)
+	return auth_service.DeleteSource(source)
 }

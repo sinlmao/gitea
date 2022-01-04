@@ -13,8 +13,24 @@ import (
 // TimeStamp defines a timestamp
 type TimeStamp int64
 
+// mock is NOT concurrency-safe!!
+var mock time.Time
+
+// Set sets the time to a mocked time.Time
+func Set(now time.Time) {
+	mock = now
+}
+
+// Unset will unset the mocked time.Time
+func Unset() {
+	mock = time.Time{}
+}
+
 // TimeStampNow returns now int64
 func TimeStampNow() TimeStamp {
+	if !mock.IsZero() {
+		return TimeStamp(mock.Unix())
+	}
 	return TimeStamp(time.Now().Unix())
 }
 
@@ -73,6 +89,11 @@ func (ts TimeStamp) FormatLong() string {
 // FormatShort formats as short
 func (ts TimeStamp) FormatShort() string {
 	return ts.Format("Jan 02, 2006")
+}
+
+// FormatDate formats a date in YYYY-MM-DD server time zone
+func (ts TimeStamp) FormatDate() string {
+	return time.Unix(int64(ts), 0).String()[:10]
 }
 
 // IsZero is zero time

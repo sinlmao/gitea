@@ -6,11 +6,17 @@
 package repo
 
 import (
+	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 
 	"code.gitea.io/gitea/models"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/convert"
 	api "code.gitea.io/gitea/modules/structs"
+	"code.gitea.io/gitea/modules/web"
+	"code.gitea.io/gitea/routers/api/v1/utils"
 )
 
 // ListLabels list all the labels of a repository
@@ -31,20 +37,32 @@ func ListLabels(ctx *context.APIContext) {
 	//   description: name of the repo
 	//   type: string
 	//   required: true
+	// - name: page
+	//   in: query
+	//   description: page number of results to return (1-based)
+	//   type: integer
+	// - name: limit
+	//   in: query
+	//   description: page size of results
+	//   type: integer
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/LabelList"
-	labels, err := models.GetLabelsByRepoID(ctx.Repo.Repository.ID, ctx.Query("sort"))
+
+	labels, err := models.GetLabelsByRepoID(ctx.Repo.Repository.ID, ctx.FormString("sort"), utils.GetListOptions(ctx))
 	if err != nil {
-		ctx.Error(500, "GetLabelsByRepoID", err)
+		ctx.Error(http.StatusInternalServerError, "GetLabelsByRepoID", err)
 		return
 	}
 
-	apiLabels := make([]*api.Label, len(labels))
-	for i := range labels {
-		apiLabels[i] = labels[i].APIFormat()
+	count, err := models.CountLabelsByRepoID(ctx.Repo.Repository.ID)
+	if err != nil {
+		ctx.InternalServerError(err)
+		return
 	}
-	ctx.JSON(200, &apiLabels)
+
+	ctx.SetTotalCountHeader(count)
+	ctx.JSON(http.StatusOK, convert.ToLabelList(labels, ctx.Repo.Repository, nil))
 }
 
 // GetLabel get label by repository and label id
@@ -74,6 +92,7 @@ func GetLabel(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Label"
+
 	var (
 		label *models.Label
 		err   error
@@ -85,19 +104,19 @@ func GetLabel(ctx *context.APIContext) {
 		label, err = models.GetLabelInRepoByID(ctx.Repo.Repository.ID, intID)
 	}
 	if err != nil {
-		if models.IsErrLabelNotExist(err) {
+		if models.IsErrRepoLabelNotExist(err) {
 			ctx.NotFound()
 		} else {
-			ctx.Error(500, "GetLabelByRepoID", err)
+			ctx.Error(http.StatusInternalServerError, "GetLabelByRepoID", err)
 		}
 		return
 	}
 
-	ctx.JSON(200, label.APIFormat())
+	ctx.JSON(http.StatusOK, convert.ToLabel(label, ctx.Repo.Repository, nil))
 }
 
 // CreateLabel create a label for a repository
-func CreateLabel(ctx *context.APIContext, form api.CreateLabelOption) {
+func CreateLabel(ctx *context.APIContext) {
 	// swagger:operation POST /repos/{owner}/{repo}/labels issue issueCreateLabel
 	// ---
 	// summary: Create a label
@@ -123,6 +142,19 @@ func CreateLabel(ctx *context.APIContext, form api.CreateLabelOption) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Label"
+	//   "422":
+	//     "$ref": "#/responses/validationError"
+
+	form := web.GetForm(ctx).(*api.CreateLabelOption)
+	form.Color = strings.Trim(form.Color, " ")
+	if len(form.Color) == 6 {
+		form.Color = "#" + form.Color
+	}
+	if !models.LabelColorPattern.MatchString(form.Color) {
+		ctx.Error(http.StatusUnprocessableEntity, "ColorPattern", fmt.Errorf("bad color code: %s", form.Color))
+		return
+	}
+
 	label := &models.Label{
 		Name:        form.Name,
 		Color:       form.Color,
@@ -130,14 +162,15 @@ func CreateLabel(ctx *context.APIContext, form api.CreateLabelOption) {
 		Description: form.Description,
 	}
 	if err := models.NewLabel(label); err != nil {
-		ctx.Error(500, "NewLabel", err)
+		ctx.Error(http.StatusInternalServerError, "NewLabel", err)
 		return
 	}
-	ctx.JSON(201, label.APIFormat())
+
+	ctx.JSON(http.StatusCreated, convert.ToLabel(label, ctx.Repo.Repository, nil))
 }
 
 // EditLabel modify a label for a repository
-func EditLabel(ctx *context.APIContext, form api.EditLabelOption) {
+func EditLabel(ctx *context.APIContext) {
 	// swagger:operation PATCH /repos/{owner}/{repo}/labels/{id} issue issueEditLabel
 	// ---
 	// summary: Update a label
@@ -169,12 +202,16 @@ func EditLabel(ctx *context.APIContext, form api.EditLabelOption) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Label"
+	//   "422":
+	//     "$ref": "#/responses/validationError"
+
+	form := web.GetForm(ctx).(*api.EditLabelOption)
 	label, err := models.GetLabelInRepoByID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id"))
 	if err != nil {
-		if models.IsErrLabelNotExist(err) {
+		if models.IsErrRepoLabelNotExist(err) {
 			ctx.NotFound()
 		} else {
-			ctx.Error(500, "GetLabelByRepoID", err)
+			ctx.Error(http.StatusInternalServerError, "GetLabelByRepoID", err)
 		}
 		return
 	}
@@ -183,16 +220,24 @@ func EditLabel(ctx *context.APIContext, form api.EditLabelOption) {
 		label.Name = *form.Name
 	}
 	if form.Color != nil {
-		label.Color = *form.Color
+		label.Color = strings.Trim(*form.Color, " ")
+		if len(label.Color) == 6 {
+			label.Color = "#" + label.Color
+		}
+		if !models.LabelColorPattern.MatchString(label.Color) {
+			ctx.Error(http.StatusUnprocessableEntity, "ColorPattern", fmt.Errorf("bad color code: %s", label.Color))
+			return
+		}
 	}
 	if form.Description != nil {
 		label.Description = *form.Description
 	}
 	if err := models.UpdateLabel(label); err != nil {
-		ctx.ServerError("UpdateLabel", err)
+		ctx.Error(http.StatusInternalServerError, "UpdateLabel", err)
 		return
 	}
-	ctx.JSON(200, label.APIFormat())
+
+	ctx.JSON(http.StatusOK, convert.ToLabel(label, ctx.Repo.Repository, nil))
 }
 
 // DeleteLabel delete a label for a repository
@@ -220,10 +265,11 @@ func DeleteLabel(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+
 	if err := models.DeleteLabel(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id")); err != nil {
-		ctx.Error(500, "DeleteLabel", err)
+		ctx.Error(http.StatusInternalServerError, "DeleteLabel", err)
 		return
 	}
 
-	ctx.Status(204)
+	ctx.Status(http.StatusNoContent)
 }

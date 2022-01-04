@@ -5,8 +5,8 @@
 package swagger
 
 import (
-	"code.gitea.io/gitea/modules/auth"
 	api "code.gitea.io/gitea/modules/structs"
+	"code.gitea.io/gitea/services/forms"
 )
 
 // not actually a response, just a hack to get go-swagger to include definitions
@@ -72,7 +72,7 @@ type swaggerParameterBodies struct {
 	// in:body
 	EditPullRequestOption api.EditPullRequestOption
 	// in:body
-	MergePullRequestOption auth.MergePullRequestForm
+	MergePullRequestOption forms.MergePullRequestForm
 
 	// in:body
 	CreateReleaseOption api.CreateReleaseOption
@@ -84,7 +84,11 @@ type swaggerParameterBodies struct {
 	// in:body
 	EditRepoOption api.EditRepoOption
 	// in:body
+	TransferRepoOption api.TransferRepoOption
+	// in:body
 	CreateForkOption api.CreateForkOption
+	// in:body
+	GenerateRepoOption api.GenerateRepoOption
 
 	// in:body
 	CreateStatusOption api.CreateStatusOption
@@ -104,7 +108,7 @@ type swaggerParameterBodies struct {
 	EditUserOption api.EditUserOption
 
 	// in:body
-	MigrateRepoForm auth.MigrateRepoForm
+	MigrateRepoForm forms.MigrateRepoForm
 
 	// in:body
 	EditAttachmentOptions api.EditAttachmentOptions
@@ -119,5 +123,53 @@ type swaggerParameterBodies struct {
 	DeleteFileOptions api.DeleteFileOptions
 
 	// in:body
+	CommitDateOptions api.CommitDateOptions
+
+	// in:body
 	RepoTopicOptions api.RepoTopicOptions
+
+	// in:body
+	EditReactionOption api.EditReactionOption
+
+	// in:body
+	CreateBranchRepoOption api.CreateBranchRepoOption
+
+	// in:body
+	CreateBranchProtectionOption api.CreateBranchProtectionOption
+
+	// in:body
+	EditBranchProtectionOption api.EditBranchProtectionOption
+
+	// in:body
+	CreateOAuth2ApplicationOptions api.CreateOAuth2ApplicationOptions
+
+	// in:body
+	CreatePullReviewOptions api.CreatePullReviewOptions
+
+	// in:body
+	CreatePullReviewComment api.CreatePullReviewComment
+
+	// in:body
+	SubmitPullReviewOptions api.SubmitPullReviewOptions
+
+	// in:body
+	DismissPullReviewOptions api.DismissPullReviewOptions
+
+	// in:body
+	MigrateRepoOptions api.MigrateRepoOptions
+
+	// in:body
+	PullReviewRequestOptions api.PullReviewRequestOptions
+
+	// in:body
+	CreateTagOption api.CreateTagOption
+
+	// in:body
+	CreateAccessTokenOption api.CreateAccessTokenOption
+
+	// in:body
+	UserSettingsOptions api.UserSettingsOptions
+
+	// in:body
+	CreateWikiPageOptions api.CreateWikiPageOptions
 }

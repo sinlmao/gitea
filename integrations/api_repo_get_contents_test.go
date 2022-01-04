@@ -9,11 +9,13 @@ import (
 	"net/url"
 	"testing"
 
-	"code.gitea.io/gitea/models"
-	"code.gitea.io/gitea/modules/context"
+	repo_model "code.gitea.io/gitea/models/repo"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
+	repo_service "code.gitea.io/gitea/services/repository"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -53,18 +55,17 @@ func TestAPIGetContents(t *testing.T) {
 
 func testAPIGetContents(t *testing.T, u *url.URL) {
 	/*** SETUP ***/
-	user2 := models.AssertExistsAndLoadBean(t, &models.User{ID: 2}).(*models.User)               // owner of the repo1 & repo16
-	user3 := models.AssertExistsAndLoadBean(t, &models.User{ID: 3}).(*models.User)               // owner of the repo3, is an org
-	user4 := models.AssertExistsAndLoadBean(t, &models.User{ID: 4}).(*models.User)               // owner of neither repos
-	repo1 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 1}).(*models.Repository)   // public repo
-	repo3 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 3}).(*models.Repository)   // public repo
-	repo16 := models.AssertExistsAndLoadBean(t, &models.Repository{ID: 16}).(*models.Repository) // private repo
+	user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2}).(*user_model.User)               // owner of the repo1 & repo16
+	user3 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 3}).(*user_model.User)               // owner of the repo3, is an org
+	user4 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 4}).(*user_model.User)               // owner of neither repos
+	repo1 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 1}).(*repo_model.Repository)   // public repo
+	repo3 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 3}).(*repo_model.Repository)   // public repo
+	repo16 := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 16}).(*repo_model.Repository) // private repo
 	treePath := "README.md"
 
 	// Get user2's token
 	session := loginUser(t, user2.Name)
 	token2 := getTokenForLoggedInUser(t, session)
-	session = emptyTestSession(t)
 	// Get user4's token
 	session = loginUser(t, user4.Name)
 	token4 := getTokenForLoggedInUser(t, session)
@@ -72,13 +73,19 @@ func testAPIGetContents(t *testing.T, u *url.URL) {
 
 	// Make a new branch in repo1
 	newBranch := "test_branch"
-	repo1.CreateNewBranch(user2, repo1.DefaultBranch, newBranch)
+	err := repo_service.CreateNewBranch(user2, repo1, repo1.DefaultBranch, newBranch)
+	assert.NoError(t, err)
 	// Get the commit ID of the default branch
-	gitRepo, _ := git.OpenRepository(repo1.RepoPath())
-	commitID, _ := gitRepo.GetBranchCommitID(repo1.DefaultBranch)
+	gitRepo, err := git.OpenRepository(repo1.RepoPath())
+	assert.NoError(t, err)
+	defer gitRepo.Close()
+
+	commitID, err := gitRepo.GetBranchCommitID(repo1.DefaultBranch)
+	assert.NoError(t, err)
 	// Make a new tag in repo1
 	newTag := "test_tag"
-	gitRepo.CreateTag(newTag, commitID)
+	err = gitRepo.CreateTag(newTag, commitID)
+	assert.NoError(t, err)
 	/*** END SETUP ***/
 
 	// ref is default ref
@@ -134,14 +141,7 @@ func testAPIGetContents(t *testing.T, u *url.URL) {
 	// Test file contents a file with a bad ref
 	ref = "badref"
 	req = NewRequestf(t, "GET", "/api/v1/repos/%s/%s/contents/%s?ref=%s", user2.Name, repo1.Name, treePath, ref)
-	resp = session.MakeRequest(t, req, http.StatusInternalServerError)
-	expectedAPIError := context.APIError{
-		Message: "object does not exist [id: " + ref + ", rel_path: ]",
-		URL:     setting.API.SwaggerURL,
-	}
-	var apiError context.APIError
-	DecodeJSON(t, resp, &apiError)
-	assert.Equal(t, expectedAPIError, apiError)
+	session.MakeRequest(t, req, http.StatusNotFound)
 
 	// Test accessing private ref with user token that does not have access - should fail
 	req = NewRequestf(t, "GET", "/api/v1/repos/%s/%s/contents/%s?token=%s", user2.Name, repo16.Name, treePath, token4)

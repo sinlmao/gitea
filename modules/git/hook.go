@@ -1,4 +1,5 @@
 // Copyright 2015 The Gogs Authors. All rights reserved.
+// Copyright 2021 The Gitea Authors. All rights reserved.
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
@@ -6,13 +7,13 @@ package git
 
 import (
 	"errors"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/unknwon/com"
+	"code.gitea.io/gitea/modules/log"
+	"code.gitea.io/gitea/modules/util"
 )
 
 // hookNames is a list of Git server hooks' name that are supported.
@@ -57,14 +58,14 @@ func GetHook(repoPath, name string) (*Hook, error) {
 	}
 	samplePath := filepath.Join(repoPath, "hooks", name+".sample")
 	if isFile(h.path) {
-		data, err := ioutil.ReadFile(h.path)
+		data, err := os.ReadFile(h.path)
 		if err != nil {
 			return nil, err
 		}
 		h.IsActive = true
 		h.Content = string(data)
 	} else if isFile(samplePath) {
-		data, err := ioutil.ReadFile(samplePath)
+		data, err := os.ReadFile(samplePath)
 		if err != nil {
 			return nil, err
 		}
@@ -82,7 +83,7 @@ func (h *Hook) Name() string {
 func (h *Hook) Update() error {
 	if len(strings.TrimSpace(h.Content)) == 0 {
 		if isExist(h.path) {
-			err := os.Remove(h.path)
+			err := util.Remove(h.path)
 			if err != nil {
 				return err
 			}
@@ -90,7 +91,12 @@ func (h *Hook) Update() error {
 		h.IsActive = false
 		return nil
 	}
-	err := ioutil.WriteFile(h.path, []byte(strings.Replace(h.Content, "\r", "", -1)), os.ModePerm)
+	d := filepath.Dir(h.path)
+	if err := os.MkdirAll(d, os.ModePerm); err != nil {
+		return err
+	}
+
+	err := os.WriteFile(h.path, []byte(strings.ReplaceAll(h.Content, "\r", "")), os.ModePerm)
 	if err != nil {
 		return err
 	}
@@ -119,17 +125,22 @@ const (
 	HookPathUpdate = "hooks/update"
 )
 
-// SetUpdateHook writes given content to update hook of the reposiotry.
+// SetUpdateHook writes given content to update hook of the repository.
 func SetUpdateHook(repoPath, content string) (err error) {
-	log("Setting update hook: %s", repoPath)
+	log.Debug("Setting update hook: %s", repoPath)
 	hookPath := path.Join(repoPath, HookPathUpdate)
-	if com.IsExist(hookPath) {
-		err = os.Remove(hookPath)
+	isExist, err := util.IsExist(hookPath)
+	if err != nil {
+		log.Debug("Unable to check if %s exists. Error: %v", hookPath, err)
+		return err
+	}
+	if isExist {
+		err = util.Remove(hookPath)
 	} else {
 		err = os.MkdirAll(path.Dir(hookPath), os.ModePerm)
 	}
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(hookPath, []byte(content), 0777)
+	return os.WriteFile(hookPath, []byte(content), 0777)
 }

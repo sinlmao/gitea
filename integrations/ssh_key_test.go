@@ -6,7 +6,6 @@ package integrations
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +15,7 @@ import (
 
 	"code.gitea.io/gitea/modules/git"
 	api "code.gitea.io/gitea/modules/structs"
+	"code.gitea.io/gitea/modules/util"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -28,7 +28,7 @@ func doCheckRepositoryEmptyStatus(ctx APITestContext, isEmpty bool) func(*testin
 
 func doAddChangesToCheckout(dstPath, filename string) func(*testing.T) {
 	return func(t *testing.T) {
-		assert.NoError(t, ioutil.WriteFile(filepath.Join(dstPath, filename), []byte(fmt.Sprintf("# Testing Repository\n\nOriginally created in: %s at time: %v", dstPath, time.Now())), 0644))
+		assert.NoError(t, os.WriteFile(filepath.Join(dstPath, filename), []byte(fmt.Sprintf("# Testing Repository\n\nOriginally created in: %s at time: %v", dstPath, time.Now())), 0644))
 		assert.NoError(t, git.AddChanges(dstPath, true))
 		signature := git.Signature{
 			Email: "test@example.com",
@@ -61,9 +61,9 @@ func testPushDeployKeyOnEmptyRepo(t *testing.T, u *url.URL) {
 		t.Run("CreatePushDeployKey", doAPICreateDeployKey(ctx, keyname, keyFile, false))
 
 		// Setup the testing repository
-		dstPath, err := ioutil.TempDir("", "repo-tmp-deploy-key-empty-repo-1")
+		dstPath, err := os.MkdirTemp("", "repo-tmp-deploy-key-empty-repo-1")
 		assert.NoError(t, err)
-		defer os.RemoveAll(dstPath)
+		defer util.RemoveAll(dstPath)
 
 		t.Run("InitTestRepository", doGitInitTestRepository(dstPath))
 
@@ -107,13 +107,13 @@ func testKeyOnlyOneType(t *testing.T, u *url.URL) {
 	withKeyFile(t, keyname, func(keyFile string) {
 		var userKeyPublicKeyID int64
 		t.Run("KeyCanOnlyBeUser", func(t *testing.T) {
-			dstPath, err := ioutil.TempDir("", ctx.Reponame)
+			dstPath, err := os.MkdirTemp("", ctx.Reponame)
 			assert.NoError(t, err)
-			defer os.RemoveAll(dstPath)
+			defer util.RemoveAll(dstPath)
 
 			sshURL := createSSHUrl(ctx.GitPath(), u)
 
-			t.Run("FailToClone", doGitCloneFail(dstPath, sshURL))
+			t.Run("FailToClone", doGitCloneFail(sshURL))
 
 			t.Run("CreateUserKey", doAPICreateUserKey(ctx, keyname, keyFile, func(t *testing.T, publicKey api.PublicKey) {
 				userKeyPublicKeyID = publicKey.ID
@@ -133,13 +133,13 @@ func testKeyOnlyOneType(t *testing.T, u *url.URL) {
 		})
 
 		t.Run("KeyCanBeAnyDeployButNotUserAswell", func(t *testing.T) {
-			dstPath, err := ioutil.TempDir("", ctx.Reponame)
+			dstPath, err := os.MkdirTemp("", ctx.Reponame)
 			assert.NoError(t, err)
-			defer os.RemoveAll(dstPath)
+			defer util.RemoveAll(dstPath)
 
 			sshURL := createSSHUrl(ctx.GitPath(), u)
 
-			t.Run("FailToClone", doGitCloneFail(dstPath, sshURL))
+			t.Run("FailToClone", doGitCloneFail(sshURL))
 
 			// Should now be able to add...
 			t.Run("AddReadOnlyDeployKey", doAPICreateDeployKey(ctx, keyname, keyFile, true))
@@ -151,9 +151,9 @@ func testKeyOnlyOneType(t *testing.T, u *url.URL) {
 			t.Run("FailToPush", doGitPushTestRepositoryFail(dstPath, "origin", "master"))
 
 			otherSSHURL := createSSHUrl(otherCtx.GitPath(), u)
-			dstOtherPath, err := ioutil.TempDir("", otherCtx.Reponame)
+			dstOtherPath, err := os.MkdirTemp("", otherCtx.Reponame)
 			assert.NoError(t, err)
-			defer os.RemoveAll(dstOtherPath)
+			defer util.RemoveAll(dstOtherPath)
 
 			t.Run("AddWriterDeployKeyToOther", doAPICreateDeployKey(otherCtx, keyname, keyFile, false))
 
@@ -168,9 +168,9 @@ func testKeyOnlyOneType(t *testing.T, u *url.URL) {
 
 		t.Run("DeleteRepositoryShouldReleaseKey", func(t *testing.T) {
 			otherSSHURL := createSSHUrl(otherCtx.GitPath(), u)
-			dstOtherPath, err := ioutil.TempDir("", otherCtx.Reponame)
+			dstOtherPath, err := os.MkdirTemp("", otherCtx.Reponame)
 			assert.NoError(t, err)
-			defer os.RemoveAll(dstOtherPath)
+			defer util.RemoveAll(dstOtherPath)
 
 			t.Run("DeleteRepository", doAPIDeleteRepository(ctx))
 
@@ -190,9 +190,9 @@ func testKeyOnlyOneType(t *testing.T, u *url.URL) {
 				userKeyPublicKeyID = publicKey.ID
 			}))
 
-			dstPath, err := ioutil.TempDir("", ctx.Reponame)
+			dstPath, err := os.MkdirTemp("", ctx.Reponame)
 			assert.NoError(t, err)
-			defer os.RemoveAll(dstPath)
+			defer util.RemoveAll(dstPath)
 
 			sshURL := createSSHUrl(ctx.GitPath(), u)
 
@@ -204,15 +204,11 @@ func testKeyOnlyOneType(t *testing.T, u *url.URL) {
 		})
 
 		t.Run("DeleteUserKeyShouldRemoveAbilityToClone", func(t *testing.T) {
-			dstPath, err := ioutil.TempDir("", ctx.Reponame)
-			assert.NoError(t, err)
-			defer os.RemoveAll(dstPath)
-
 			sshURL := createSSHUrl(ctx.GitPath(), u)
 
 			t.Run("DeleteUserKey", doAPIDeleteUserKey(ctx, userKeyPublicKeyID))
 
-			t.Run("FailToClone", doGitCloneFail(dstPath, sshURL))
+			t.Run("FailToClone", doGitCloneFail(sshURL))
 		})
 	})
 }

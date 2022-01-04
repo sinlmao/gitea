@@ -8,7 +8,8 @@ import (
 	"net/http"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/test"
 
 	"github.com/stretchr/testify/assert"
@@ -16,30 +17,30 @@ import (
 )
 
 func TestViewUser(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	req := NewRequest(t, "GET", "/user2")
 	MakeRequest(t, req, http.StatusOK)
 }
 
 func TestRenameUsername(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	session := loginUser(t, "user2")
 	req := NewRequestWithValues(t, "POST", "/user/settings", map[string]string{
 		"_csrf":    GetCSRF(t, session, "/user/settings"),
 		"name":     "newUsername",
 		"email":    "user2@example.com",
-		"language": "en-us",
+		"language": "en-US",
 	})
 	session.MakeRequest(t, req, http.StatusFound)
 
-	models.AssertExistsAndLoadBean(t, &models.User{Name: "newUsername"})
-	models.AssertNotExistsBean(t, &models.User{Name: "user2"})
+	unittest.AssertExistsAndLoadBean(t, &user_model.User{Name: "newUsername"})
+	unittest.AssertNotExistsBean(t, &user_model.User{Name: "user2"})
 }
 
 func TestRenameInvalidUsername(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	invalidUsernames := []string{
 		"%2f*",
@@ -66,17 +67,31 @@ func TestRenameInvalidUsername(t *testing.T) {
 			i18n.Tr("en", "form.alpha_dash_dot_error"),
 		)
 
-		models.AssertNotExistsBean(t, &models.User{Name: invalidUsername})
+		unittest.AssertNotExistsBean(t, &user_model.User{Name: invalidUsername})
 	}
 }
 
 func TestRenameReservedUsername(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	reservedUsernames := []string{
+		"admin",
+		"api",
+		"attachments",
+		"avatars",
+		"explore",
 		"help",
-		"user",
+		"install",
+		"issues",
+		"login",
+		"metrics",
+		"notifications",
+		"org",
+		"pulls",
+		"repo",
 		"template",
+		"user",
+		"search",
 	}
 
 	session := loginUser(t, "user2")
@@ -86,7 +101,7 @@ func TestRenameReservedUsername(t *testing.T) {
 			"_csrf":    GetCSRF(t, session, "/user/settings"),
 			"name":     reservedUsername,
 			"email":    "user2@example.com",
-			"language": "en-us",
+			"language": "en-US",
 		})
 		resp := session.MakeRequest(t, req, http.StatusFound)
 
@@ -98,12 +113,12 @@ func TestRenameReservedUsername(t *testing.T) {
 			i18n.Tr("en", "user.form.name_reserved", reservedUsername),
 		)
 
-		models.AssertNotExistsBean(t, &models.User{Name: reservedUsername})
+		unittest.AssertNotExistsBean(t, &user_model.User{Name: reservedUsername})
 	}
 }
 
 func TestExportUserGPGKeys(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	//Export empty key list
 	testExportUserGPGKeys(t, "user1", `-----BEGIN PGP PUBLIC KEY BLOCK-----
 

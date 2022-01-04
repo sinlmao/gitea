@@ -1,16 +1,22 @@
 // Copyright 2014 The Gogs Authors. All rights reserved.
+// Copyright 2020 The Gitea Authors.
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
 package repo
 
 import (
-	"code.gitea.io/gitea/models"
+	"net/http"
+
+	"code.gitea.io/gitea/models/perm"
+	"code.gitea.io/gitea/models/webhook"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/convert"
 	"code.gitea.io/gitea/modules/git"
 	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/convert"
+	"code.gitea.io/gitea/modules/web"
 	"code.gitea.io/gitea/routers/api/v1/utils"
+	webhook_service "code.gitea.io/gitea/services/webhook"
 )
 
 // ListHooks list all hooks of a repository
@@ -31,12 +37,32 @@ func ListHooks(ctx *context.APIContext) {
 	//   description: name of the repo
 	//   type: string
 	//   required: true
+	// - name: page
+	//   in: query
+	//   description: page number of results to return (1-based)
+	//   type: integer
+	// - name: limit
+	//   in: query
+	//   description: page size of results
+	//   type: integer
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/HookList"
-	hooks, err := models.GetWebhooksByRepoID(ctx.Repo.Repository.ID)
+
+	opts := &webhook.ListWebhookOptions{
+		ListOptions: utils.GetListOptions(ctx),
+		RepoID:      ctx.Repo.Repository.ID,
+	}
+
+	count, err := webhook.CountWebhooksByOpts(opts)
 	if err != nil {
-		ctx.Error(500, "GetWebhooksByRepoID", err)
+		ctx.InternalServerError(err)
+		return
+	}
+
+	hooks, err := webhook.ListWebhooksByOpts(opts)
+	if err != nil {
+		ctx.InternalServerError(err)
 		return
 	}
 
@@ -44,7 +70,9 @@ func ListHooks(ctx *context.APIContext) {
 	for i := range hooks {
 		apiHooks[i] = convert.ToHook(ctx.Repo.RepoLink, hooks[i])
 	}
-	ctx.JSON(200, &apiHooks)
+
+	ctx.SetTotalCountHeader(count)
+	ctx.JSON(http.StatusOK, &apiHooks)
 }
 
 // GetHook get a repo's hook by id
@@ -74,13 +102,16 @@ func GetHook(ctx *context.APIContext) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Hook"
+	//   "404":
+	//     "$ref": "#/responses/notFound"
+
 	repo := ctx.Repo
 	hookID := ctx.ParamsInt64(":id")
 	hook, err := utils.GetRepoHook(ctx, repo.Repository.ID, hookID)
 	if err != nil {
 		return
 	}
-	ctx.JSON(200, convert.ToHook(repo.RepoLink, hook))
+	ctx.JSON(http.StatusOK, convert.ToHook(repo.RepoLink, hook))
 }
 
 // TestHook tests a hook
@@ -110,9 +141,10 @@ func TestHook(ctx *context.APIContext) {
 	// responses:
 	//   "204":
 	//     "$ref": "#/responses/empty"
+
 	if ctx.Repo.Commit == nil {
 		// if repo does not have any commits, then don't send a webhook
-		ctx.Status(204)
+		ctx.Status(http.StatusNoContent)
 		return
 	}
 
@@ -122,26 +154,27 @@ func TestHook(ctx *context.APIContext) {
 		return
 	}
 
-	if err := models.PrepareWebhook(hook, ctx.Repo.Repository, models.HookEventPush, &api.PushPayload{
-		Ref:    git.BranchPrefix + ctx.Repo.Repository.DefaultBranch,
-		Before: ctx.Repo.Commit.ID.String(),
-		After:  ctx.Repo.Commit.ID.String(),
-		Commits: []*api.PayloadCommit{
-			convert.ToCommit(ctx.Repo.Repository, ctx.Repo.Commit),
-		},
-		Repo:   ctx.Repo.Repository.APIFormat(models.AccessModeNone),
-		Pusher: convert.ToUser(ctx.User, ctx.IsSigned, false),
-		Sender: convert.ToUser(ctx.User, ctx.IsSigned, false),
+	commit := convert.ToPayloadCommit(ctx.Repo.Repository, ctx.Repo.Commit)
+
+	if err := webhook_service.PrepareWebhook(hook, ctx.Repo.Repository, webhook.HookEventPush, &api.PushPayload{
+		Ref:        git.BranchPrefix + ctx.Repo.Repository.DefaultBranch,
+		Before:     ctx.Repo.Commit.ID.String(),
+		After:      ctx.Repo.Commit.ID.String(),
+		Commits:    []*api.PayloadCommit{commit},
+		HeadCommit: commit,
+		Repo:       convert.ToRepo(ctx.Repo.Repository, perm.AccessModeNone),
+		Pusher:     convert.ToUserWithAccessMode(ctx.User, perm.AccessModeNone),
+		Sender:     convert.ToUserWithAccessMode(ctx.User, perm.AccessModeNone),
 	}); err != nil {
-		ctx.Error(500, "PrepareWebhook: ", err)
+		ctx.Error(http.StatusInternalServerError, "PrepareWebhook: ", err)
 		return
 	}
-	go models.HookQueue.Add(ctx.Repo.Repository.ID)
-	ctx.Status(204)
+
+	ctx.Status(http.StatusNoContent)
 }
 
 // CreateHook create a hook for a repository
-func CreateHook(ctx *context.APIContext, form api.CreateHookOption) {
+func CreateHook(ctx *context.APIContext) {
 	// swagger:operation POST /repos/{owner}/{repo}/hooks repository repoCreateHook
 	// ---
 	// summary: Create a hook
@@ -167,14 +200,16 @@ func CreateHook(ctx *context.APIContext, form api.CreateHookOption) {
 	// responses:
 	//   "201":
 	//     "$ref": "#/responses/Hook"
-	if !utils.CheckCreateHookOption(ctx, &form) {
+	form := web.GetForm(ctx).(*api.CreateHookOption)
+
+	if !utils.CheckCreateHookOption(ctx, form) {
 		return
 	}
-	utils.AddRepoHook(ctx, &form)
+	utils.AddRepoHook(ctx, form)
 }
 
 // EditHook modify a hook of a repository
-func EditHook(ctx *context.APIContext, form api.EditHookOption) {
+func EditHook(ctx *context.APIContext) {
 	// swagger:operation PATCH /repos/{owner}/{repo}/hooks/{id} repository repoEditHook
 	// ---
 	// summary: Edit a hook in a repository
@@ -204,8 +239,9 @@ func EditHook(ctx *context.APIContext, form api.EditHookOption) {
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/Hook"
+	form := web.GetForm(ctx).(*api.EditHookOption)
 	hookID := ctx.ParamsInt64(":id")
-	utils.EditRepoHook(ctx, &form, hookID)
+	utils.EditRepoHook(ctx, form, hookID)
 }
 
 // DeleteHook delete a hook of a repository
@@ -237,13 +273,13 @@ func DeleteHook(ctx *context.APIContext) {
 	//     "$ref": "#/responses/empty"
 	//   "404":
 	//     "$ref": "#/responses/notFound"
-	if err := models.DeleteWebhookByRepoID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id")); err != nil {
-		if models.IsErrWebhookNotExist(err) {
+	if err := webhook.DeleteWebhookByRepoID(ctx.Repo.Repository.ID, ctx.ParamsInt64(":id")); err != nil {
+		if webhook.IsErrWebhookNotExist(err) {
 			ctx.NotFound()
 		} else {
-			ctx.Error(500, "DeleteWebhookByRepoID", err)
+			ctx.Error(http.StatusInternalServerError, "DeleteWebhookByRepoID", err)
 		}
 		return
 	}
-	ctx.Status(204)
+	ctx.Status(http.StatusNoContent)
 }

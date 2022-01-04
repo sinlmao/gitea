@@ -10,20 +10,24 @@ import (
 	"net/url"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	asymkey_model "code.gitea.io/gitea/models/asymkey"
+	"code.gitea.io/gitea/models/perm"
+	repo_model "code.gitea.io/gitea/models/repo"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	api "code.gitea.io/gitea/modules/structs"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestViewDeployKeysNoLogin(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "GET", "/api/v1/repos/user2/repo1/keys")
 	MakeRequest(t, req, http.StatusUnauthorized)
 }
 
 func TestCreateDeployKeyNoLogin(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequestWithJSON(t, "POST", "/api/v1/repos/user2/repo1/keys", api.CreateKeyOption{
 		Title: "title",
 		Key:   "key",
@@ -32,28 +36,28 @@ func TestCreateDeployKeyNoLogin(t *testing.T) {
 }
 
 func TestGetDeployKeyNoLogin(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "GET", "/api/v1/repos/user2/repo1/keys/1")
 	MakeRequest(t, req, http.StatusUnauthorized)
 }
 
 func TestDeleteDeployKeyNoLogin(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 	req := NewRequest(t, "DELETE", "/api/v1/repos/user2/repo1/keys/1")
 	MakeRequest(t, req, http.StatusUnauthorized)
 }
 
 func TestCreateReadOnlyDeployKey(t *testing.T) {
-	prepareTestEnv(t)
-	repo := models.AssertExistsAndLoadBean(t, &models.Repository{Name: "repo1"}).(*models.Repository)
-	repoOwner := models.AssertExistsAndLoadBean(t, &models.User{ID: repo.OwnerID}).(*models.User)
+	defer prepareTestEnv(t)()
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{Name: "repo1"}).(*repo_model.Repository)
+	repoOwner := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: repo.OwnerID}).(*user_model.User)
 
 	session := loginUser(t, repoOwner.Name)
 	token := getTokenForLoggedInUser(t, session)
 	keysURL := fmt.Sprintf("/api/v1/repos/%s/%s/keys?token=%s", repoOwner.Name, repo.Name, token)
 	rawKeyBody := api.CreateKeyOption{
 		Title:    "read-only",
-		Key:      "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDAu7tvIvX6ZHrRXuZNfkR3XLHSsuCK9Zn3X58lxBcQzuo5xZgB6vRwwm/QtJuF+zZPtY5hsQILBLmF+BZ5WpKZp1jBeSjH2G7lxet9kbcH+kIVj0tPFEoyKI9wvWqIwC4prx/WVk2wLTJjzBAhyNxfEq7C9CeiX9pQEbEqJfkKCQ== nocomment\n",
+		Key:      "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC4cn+iXnA4KvcQYSV88vGn0Yi91vG47t1P7okprVmhNTkipNRIHWr6WdCO4VDr/cvsRkuVJAsLO2enwjGWWueOO6BodiBgyAOZ/5t5nJNMCNuLGT5UIo/RI1b0WRQwxEZTRjt6mFNw6lH14wRd8ulsr9toSWBPMOGWoYs1PDeDL0JuTjL+tr1SZi/EyxCngpYszKdXllJEHyI79KQgeD0Vt3pTrkbNVTOEcCNqZePSVmUH8X8Vhugz3bnE0/iE9Pb5fkWO9c4AnM1FgI/8Bvp27Fw2ShryIXuR6kKvUqhVMTuOSDHwu6A8jLE5Owt3GAYugDpDYuwTVNGrHLXKpPzrGGPE/jPmaLCMZcsdkec95dYeU3zKODEm8UQZFhmJmDeWVJ36nGrGZHL4J5aTTaeFUJmmXDaJYiJ+K2/ioKgXqnXvltu0A9R8/LGy4nrTJRr4JMLuJFoUXvGm1gXQ70w2LSpk6yl71RNC0hCtsBe8BP8IhYCM0EP5jh7eCMQZNvM= nocomment\n",
 		ReadOnly: true,
 	}
 	req := NewRequestWithJSON(t, "POST", keysURL, rawKeyBody)
@@ -61,48 +65,48 @@ func TestCreateReadOnlyDeployKey(t *testing.T) {
 
 	var newDeployKey api.DeployKey
 	DecodeJSON(t, resp, &newDeployKey)
-	models.AssertExistsAndLoadBean(t, &models.DeployKey{
+	unittest.AssertExistsAndLoadBean(t, &asymkey_model.DeployKey{
 		ID:      newDeployKey.ID,
 		Name:    rawKeyBody.Title,
 		Content: rawKeyBody.Key,
-		Mode:    models.AccessModeRead,
+		Mode:    perm.AccessModeRead,
 	})
 }
 
 func TestCreateReadWriteDeployKey(t *testing.T) {
-	prepareTestEnv(t)
-	repo := models.AssertExistsAndLoadBean(t, &models.Repository{Name: "repo1"}).(*models.Repository)
-	repoOwner := models.AssertExistsAndLoadBean(t, &models.User{ID: repo.OwnerID}).(*models.User)
+	defer prepareTestEnv(t)()
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{Name: "repo1"}).(*repo_model.Repository)
+	repoOwner := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: repo.OwnerID}).(*user_model.User)
 
 	session := loginUser(t, repoOwner.Name)
 	token := getTokenForLoggedInUser(t, session)
 	keysURL := fmt.Sprintf("/api/v1/repos/%s/%s/keys?token=%s", repoOwner.Name, repo.Name, token)
 	rawKeyBody := api.CreateKeyOption{
 		Title: "read-write",
-		Key:   "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDsufOCrDDlT8DLkodnnJtbq7uGflcPae7euTfM+Laq4So+v4WeSV362Rg0O/+Sje1UthrhN6lQkfRkdWIlCRQEXg+LMqr6RhvDfZquE2Xwqv/itlz7LjbdAUdYoO1iH7rMSmYvQh4WEnC/DAacKGbhdGIM/ZBz0z6tHm7bPgbI9ykEKekTmPwQFP1Qebvf5NYOFMWqQ2sCEAI9dBMVLoojsIpV+KADf+BotiIi8yNfTG2rzmzpxBpW9fYjd1Sy1yd4NSUpoPbEJJYJ1TrjiSWlYOVq9Ar8xW1O87i6gBjL/3zN7ANeoYhaAXupdOS6YL22YOK/yC0tJtXwwdh/eSrh",
+		Key:   "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC4cn+iXnA4KvcQYSV88vGn0Yi91vG47t1P7okprVmhNTkipNRIHWr6WdCO4VDr/cvsRkuVJAsLO2enwjGWWueOO6BodiBgyAOZ/5t5nJNMCNuLGT5UIo/RI1b0WRQwxEZTRjt6mFNw6lH14wRd8ulsr9toSWBPMOGWoYs1PDeDL0JuTjL+tr1SZi/EyxCngpYszKdXllJEHyI79KQgeD0Vt3pTrkbNVTOEcCNqZePSVmUH8X8Vhugz3bnE0/iE9Pb5fkWO9c4AnM1FgI/8Bvp27Fw2ShryIXuR6kKvUqhVMTuOSDHwu6A8jLE5Owt3GAYugDpDYuwTVNGrHLXKpPzrGGPE/jPmaLCMZcsdkec95dYeU3zKODEm8UQZFhmJmDeWVJ36nGrGZHL4J5aTTaeFUJmmXDaJYiJ+K2/ioKgXqnXvltu0A9R8/LGy4nrTJRr4JMLuJFoUXvGm1gXQ70w2LSpk6yl71RNC0hCtsBe8BP8IhYCM0EP5jh7eCMQZNvM= nocomment\n",
 	}
 	req := NewRequestWithJSON(t, "POST", keysURL, rawKeyBody)
 	resp := session.MakeRequest(t, req, http.StatusCreated)
 
 	var newDeployKey api.DeployKey
 	DecodeJSON(t, resp, &newDeployKey)
-	models.AssertExistsAndLoadBean(t, &models.DeployKey{
+	unittest.AssertExistsAndLoadBean(t, &asymkey_model.DeployKey{
 		ID:      newDeployKey.ID,
 		Name:    rawKeyBody.Title,
 		Content: rawKeyBody.Key,
-		Mode:    models.AccessModeWrite,
+		Mode:    perm.AccessModeWrite,
 	})
 }
 
 func TestCreateUserKey(t *testing.T) {
-	prepareTestEnv(t)
-	user := models.AssertExistsAndLoadBean(t, &models.User{Name: "user1"}).(*models.User)
+	defer prepareTestEnv(t)()
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{Name: "user1"}).(*user_model.User)
 
 	session := loginUser(t, "user1")
 	token := url.QueryEscape(getTokenForLoggedInUser(t, session))
 	keysURL := fmt.Sprintf("/api/v1/user/keys?token=%s", token)
 	keyType := "ssh-rsa"
-	keyContent := "AAAAB3NzaC1yc2EAAAADAQABAAABAQCyTiPTeHJl6Gs5D1FyHT0qTWpVkAy9+LIKjctQXklrePTvUNVrSpt4r2exFYXNMPeA8V0zCrc3Kzs1SZw3jWkG3i53te9onCp85DqyatxOD2pyZ30/gPn1ZUg40WowlFM8gsUFMZqaH7ax6d8nsBKW7N/cRyqesiOQEV9up3tnKjIB8XMTVvC5X4rBWgywz7AFxSv8mmaTHnUgVW4LgMPwnTWo0pxtiIWbeMLyrEE4hIM74gSwp6CRQYo6xnG3fn4yWkcK2X2mT9adQ241IDdwpENJHcry/T6AJ8dNXduEZ67egnk+rVlQ2HM4LpymAv9DAAFFeaQK0hT+3aMDoumV"
+	keyContent := "AAAAB3NzaC1yc2EAAAADAQABAAABgQC4cn+iXnA4KvcQYSV88vGn0Yi91vG47t1P7okprVmhNTkipNRIHWr6WdCO4VDr/cvsRkuVJAsLO2enwjGWWueOO6BodiBgyAOZ/5t5nJNMCNuLGT5UIo/RI1b0WRQwxEZTRjt6mFNw6lH14wRd8ulsr9toSWBPMOGWoYs1PDeDL0JuTjL+tr1SZi/EyxCngpYszKdXllJEHyI79KQgeD0Vt3pTrkbNVTOEcCNqZePSVmUH8X8Vhugz3bnE0/iE9Pb5fkWO9c4AnM1FgI/8Bvp27Fw2ShryIXuR6kKvUqhVMTuOSDHwu6A8jLE5Owt3GAYugDpDYuwTVNGrHLXKpPzrGGPE/jPmaLCMZcsdkec95dYeU3zKODEm8UQZFhmJmDeWVJ36nGrGZHL4J5aTTaeFUJmmXDaJYiJ+K2/ioKgXqnXvltu0A9R8/LGy4nrTJRr4JMLuJFoUXvGm1gXQ70w2LSpk6yl71RNC0hCtsBe8BP8IhYCM0EP5jh7eCMQZNvM="
 	rawKeyBody := api.CreateKeyOption{
 		Title: "test-key",
 		Key:   keyType + " " + keyContent,
@@ -112,12 +116,12 @@ func TestCreateUserKey(t *testing.T) {
 
 	var newPublicKey api.PublicKey
 	DecodeJSON(t, resp, &newPublicKey)
-	models.AssertExistsAndLoadBean(t, &models.PublicKey{
+	unittest.AssertExistsAndLoadBean(t, &asymkey_model.PublicKey{
 		ID:      newPublicKey.ID,
 		OwnerID: user.ID,
 		Name:    rawKeyBody.Title,
 		Content: rawKeyBody.Key,
-		Mode:    models.AccessModeWrite,
+		Mode:    perm.AccessModeWrite,
 	})
 
 	// Search by fingerprint

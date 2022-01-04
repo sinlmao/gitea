@@ -5,18 +5,18 @@
 package integrations
 
 import (
-	"encoding/json"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/setting"
-	"code.gitea.io/gitea/routers/routes"
+	"code.gitea.io/gitea/modules/util"
+	"code.gitea.io/gitea/routers"
 
-	"gitea.com/macaron/session"
+	"gitea.com/go-chi/session"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -52,27 +52,27 @@ func sessionFileExist(t *testing.T, tmpDir, sessionID string) bool {
 }
 
 func TestSessionFileCreation(t *testing.T) {
-	prepareTestEnv(t)
+	defer prepareTestEnv(t)()
 
 	oldSessionConfig := setting.SessionConfig.ProviderConfig
 	defer func() {
 		setting.SessionConfig.ProviderConfig = oldSessionConfig
-		mac = routes.NewMacaron()
-		routes.RegisterRoutes(mac)
+		c = routers.NormalRoutes()
 	}()
 
 	var config session.Options
+
 	err := json.Unmarshal([]byte(oldSessionConfig), &config)
 	assert.NoError(t, err)
 
 	config.Provider = "file"
 
 	// Now create a temporaryDirectory
-	tmpDir, err := ioutil.TempDir("", "sessions")
+	tmpDir, err := os.MkdirTemp("", "sessions")
 	assert.NoError(t, err)
 	defer func() {
 		if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
-			_ = os.RemoveAll(tmpDir)
+			_ = util.RemoveAll(tmpDir)
 		}
 	}()
 	config.ProviderConfig = tmpDir
@@ -82,11 +82,10 @@ func TestSessionFileCreation(t *testing.T) {
 
 	setting.SessionConfig.ProviderConfig = string(newConfigBytes)
 
-	mac = routes.NewMacaron()
-	routes.RegisterRoutes(mac)
+	c = routers.NormalRoutes()
 
 	t.Run("NoSessionOnViewIssue", func(t *testing.T) {
-		PrintCurrentTest(t)
+		defer PrintCurrentTest(t)()
 
 		req := NewRequest(t, "GET", "/user2/repo1/issues/1")
 		resp := MakeRequest(t, req, http.StatusOK)
@@ -96,7 +95,7 @@ func TestSessionFileCreation(t *testing.T) {
 		assert.False(t, sessionFileExist(t, tmpDir, sessionID))
 	})
 	t.Run("CreateSessionOnLogin", func(t *testing.T) {
-		PrintCurrentTest(t)
+		defer PrintCurrentTest(t)()
 
 		req := NewRequest(t, "GET", "/user/login")
 		resp := MakeRequest(t, req, http.StatusOK)

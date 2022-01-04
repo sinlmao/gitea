@@ -11,7 +11,7 @@ import (
 	"time"
 
 	// "github.com/cockroachdb/apd"
-	"cloud.google.com/go/civil"
+	"github.com/golang-sql/civil"
 )
 
 // Type alias provided for compatibility.
@@ -110,7 +110,7 @@ func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 		return nil
 	case *ReturnStatus:
 		*v = 0 // By default the return value should be zero.
-		c.returnStatus = v
+		c.sess.returnStatus = v
 		return driver.ErrRemoveArgument
 	case TVP:
 		return nil

@@ -5,12 +5,11 @@
 package migrations
 
 import (
-	"github.com/go-xorm/xorm"
 	"xorm.io/builder"
+	"xorm.io/xorm"
 )
 
 func removeLingeringIndexStatus(x *xorm.Engine) error {
-
 	_, err := x.Exec(builder.Delete(builder.NotIn("`repo_id`", builder.Select("`id`").From("`repository`"))).From("`repo_indexer_status`"))
 	return err
 }

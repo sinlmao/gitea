@@ -9,9 +9,12 @@ import (
 	"sort"
 	"time"
 
+	"code.gitea.io/gitea/models/db"
+	repo_model "code.gitea.io/gitea/models/repo"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/git"
 
-	"github.com/go-xorm/xorm"
+	"xorm.io/xorm"
 )
 
 // ActivityAuthorData represents statistical git commit count data
@@ -19,6 +22,7 @@ type ActivityAuthorData struct {
 	Name       string `json:"name"`
 	Login      string `json:"login"`
 	AvatarLink string `json:"avatar_link"`
+	HomeLink   string `json:"home_link"`
 	Commits    int64  `json:"commits"`
 }
 
@@ -39,7 +43,7 @@ type ActivityStats struct {
 }
 
 // GetActivityStats return stats for repository at given time range
-func GetActivityStats(repo *Repository, timeFrom time.Time, releases, issues, prs, code bool) (*ActivityStats, error) {
+func GetActivityStats(repo *repo_model.Repository, timeFrom time.Time, releases, issues, prs, code bool) (*ActivityStats, error) {
 	stats := &ActivityStats{Code: &git.CodeActivityStats{}}
 	if releases {
 		if err := stats.FillReleases(repo.ID, timeFrom); err != nil {
@@ -64,6 +68,8 @@ func GetActivityStats(repo *Repository, timeFrom time.Time, releases, issues, pr
 		if err != nil {
 			return nil, fmt.Errorf("OpenRepository: %v", err)
 		}
+		defer gitRepo.Close()
+
 		code, err := gitRepo.GetCodeActivityStats(timeFrom, repo.DefaultBranch)
 		if err != nil {
 			return nil, fmt.Errorf("FillFromGit: %v", err)
@@ -74,11 +80,13 @@ func GetActivityStats(repo *Repository, timeFrom time.Time, releases, issues, pr
 }
 
 // GetActivityStatsTopAuthors returns top author stats for git commits for all branches
-func GetActivityStatsTopAuthors(repo *Repository, timeFrom time.Time, count int) ([]*ActivityAuthorData, error) {
+func GetActivityStatsTopAuthors(repo *repo_model.Repository, timeFrom time.Time, count int) ([]*ActivityAuthorData, error) {
 	gitRepo, err := git.OpenRepository(repo.RepoPath())
 	if err != nil {
 		return nil, fmt.Errorf("OpenRepository: %v", err)
 	}
+	defer gitRepo.Close()
+
 	code, err := gitRepo.GetCodeActivityStats(timeFrom, "")
 	if err != nil {
 		return nil, fmt.Errorf("FillFromGit: %v", err)
@@ -87,12 +95,20 @@ func GetActivityStatsTopAuthors(repo *Repository, timeFrom time.Time, count int)
 		return nil, nil
 	}
 	users := make(map[int64]*ActivityAuthorData)
-	for k, v := range code.Authors {
-		if len(k) == 0 {
+	var unknownUserID int64
+	unknownUserAvatarLink := user_model.NewGhostUser().AvatarLink()
+	for _, v := range code.Authors {
+		if len(v.Email) == 0 {
 			continue
 		}
-		u, err := GetUserByEmail(k)
-		if u == nil || IsErrUserNotExist(err) {
+		u, err := user_model.GetUserByEmail(v.Email)
+		if u == nil || user_model.IsErrUserNotExist(err) {
+			unknownUserID--
+			users[unknownUserID] = &ActivityAuthorData{
+				Name:       v.Name,
+				AvatarLink: unknownUserAvatarLink,
+				Commits:    v.Commits,
+			}
 			continue
 		}
 		if err != nil {
@@ -103,10 +119,11 @@ func GetActivityStatsTopAuthors(repo *Repository, timeFrom time.Time, count int)
 				Name:       u.DisplayName(),
 				Login:      u.LowerName,
 				AvatarLink: u.AvatarLink(),
-				Commits:    v,
+				HomeLink:   u.HomeLink(),
+				Commits:    v.Commits,
 			}
 		} else {
-			user.Commits += v
+			user.Commits += v.Commits
 		}
 	}
 	v := make([]*ActivityAuthorData, 0)
@@ -115,7 +132,7 @@ func GetActivityStatsTopAuthors(repo *Repository, timeFrom time.Time, count int)
 	}
 
 	sort.Slice(v, func(i, j int) bool {
-		return v[i].Commits < v[j].Commits
+		return v[i].Commits > v[j].Commits
 	})
 
 	cnt := count
@@ -231,7 +248,7 @@ func (stats *ActivityStats) FillPullRequests(repoID int64, fromTime time.Time) e
 }
 
 func pullRequestsForActivityStatement(repoID int64, fromTime time.Time, merged bool) *xorm.Session {
-	sess := x.Where("pull_request.base_repo_id=?", repoID).
+	sess := db.GetEngine(db.DefaultContext).Where("pull_request.base_repo_id=?", repoID).
 		Join("INNER", "issue", "pull_request.issue_id = issue.id")
 
 	if merged {
@@ -299,7 +316,7 @@ func (stats *ActivityStats) FillUnresolvedIssues(repoID int64, fromTime time.Tim
 }
 
 func issuesForActivityStatement(repoID int64, fromTime time.Time, closed, unresolved bool) *xorm.Session {
-	sess := x.Where("issue.repo_id = ?", repoID).
+	sess := db.GetEngine(db.DefaultContext).Where("issue.repo_id = ?", repoID).
 		And("issue.is_closed = ?", closed)
 
 	if !unresolved {
@@ -341,7 +358,7 @@ func (stats *ActivityStats) FillReleases(repoID int64, fromTime time.Time) error
 }
 
 func releasesForActivityStatement(repoID int64, fromTime time.Time) *xorm.Session {
-	return x.Where("release.repo_id = ?", repoID).
+	return db.GetEngine(db.DefaultContext).Where("release.repo_id = ?", repoID).
 		And("release.is_draft = ?", false).
 		And("release.created_unix >= ?", fromTime.Unix())
 }

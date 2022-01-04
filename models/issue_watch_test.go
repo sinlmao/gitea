@@ -7,50 +7,61 @@ package models
 import (
 	"testing"
 
+	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/models/unittest"
+
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCreateOrUpdateIssueWatch(t *testing.T) {
-	assert.NoError(t, PrepareTestDatabase())
+	assert.NoError(t, unittest.PrepareTestDatabase())
 
 	assert.NoError(t, CreateOrUpdateIssueWatch(3, 1, true))
-	iw := AssertExistsAndLoadBean(t, &IssueWatch{UserID: 3, IssueID: 1}).(*IssueWatch)
-	assert.Equal(t, true, iw.IsWatching)
+	iw := unittest.AssertExistsAndLoadBean(t, &IssueWatch{UserID: 3, IssueID: 1}).(*IssueWatch)
+	assert.True(t, iw.IsWatching)
 
 	assert.NoError(t, CreateOrUpdateIssueWatch(1, 1, false))
-	iw = AssertExistsAndLoadBean(t, &IssueWatch{UserID: 1, IssueID: 1}).(*IssueWatch)
-	assert.Equal(t, false, iw.IsWatching)
+	iw = unittest.AssertExistsAndLoadBean(t, &IssueWatch{UserID: 1, IssueID: 1}).(*IssueWatch)
+	assert.False(t, iw.IsWatching)
 }
 
 func TestGetIssueWatch(t *testing.T) {
-	assert.NoError(t, PrepareTestDatabase())
+	assert.NoError(t, unittest.PrepareTestDatabase())
 
 	_, exists, err := GetIssueWatch(9, 1)
-	assert.Equal(t, true, exists)
+	assert.True(t, exists)
 	assert.NoError(t, err)
 
-	_, exists, err = GetIssueWatch(2, 2)
-	assert.Equal(t, true, exists)
+	iw, exists, err := GetIssueWatch(2, 2)
+	assert.True(t, exists)
 	assert.NoError(t, err)
+	assert.False(t, iw.IsWatching)
 
 	_, exists, err = GetIssueWatch(3, 1)
-	assert.Equal(t, false, exists)
+	assert.False(t, exists)
 	assert.NoError(t, err)
 }
 
 func TestGetIssueWatchers(t *testing.T) {
-	assert.NoError(t, PrepareTestDatabase())
+	assert.NoError(t, unittest.PrepareTestDatabase())
 
-	iws, err := GetIssueWatchers(1)
+	iws, err := GetIssueWatchers(1, db.ListOptions{})
 	assert.NoError(t, err)
 	// Watcher is inactive, thus 0
-	assert.Equal(t, 0, len(iws))
+	assert.Len(t, iws, 0)
 
-	iws, err = GetIssueWatchers(2)
+	iws, err = GetIssueWatchers(2, db.ListOptions{})
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(iws))
+	// Watcher is explicit not watching
+	assert.Len(t, iws, 0)
 
-	iws, err = GetIssueWatchers(5)
+	iws, err = GetIssueWatchers(5, db.ListOptions{})
 	assert.NoError(t, err)
-	assert.Equal(t, 0, len(iws))
+	// Issue has no Watchers
+	assert.Len(t, iws, 0)
+
+	iws, err = GetIssueWatchers(7, db.ListOptions{})
+	assert.NoError(t, err)
+	// Issue has one watcher
+	assert.Len(t, iws, 1)
 }

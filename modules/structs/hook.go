@@ -6,10 +6,11 @@
 package structs
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
+
+	"code.gitea.io/gitea/modules/json"
 )
 
 var (
@@ -34,28 +35,33 @@ type Hook struct {
 // HookList represents a list of API hook.
 type HookList []*Hook
 
+// CreateHookOptionConfig has all config options in it
+// required are "content_type" and "url" Required
+type CreateHookOptionConfig map[string]string
+
 // CreateHookOption options when create a hook
 type CreateHookOption struct {
 	// required: true
-	// enum: gitea,gogs,slack,discord
+	// enum: dingtalk,discord,gitea,gogs,msteams,slack,telegram,feishu,wechatwork
 	Type string `json:"type" binding:"Required"`
 	// required: true
-	Config map[string]string `json:"config" binding:"Required"`
-	Events []string          `json:"events"`
+	Config       CreateHookOptionConfig `json:"config" binding:"Required"`
+	Events       []string               `json:"events"`
+	BranchFilter string                 `json:"branch_filter" binding:"GlobPattern"`
 	// default: false
 	Active bool `json:"active"`
 }
 
 // EditHookOption options when modify one hook
 type EditHookOption struct {
-	Config map[string]string `json:"config"`
-	Events []string          `json:"events"`
-	Active *bool             `json:"active"`
+	Config       map[string]string `json:"config"`
+	Events       []string          `json:"events"`
+	BranchFilter string            `json:"branch_filter" binding:"GlobPattern"`
+	Active       *bool             `json:"active"`
 }
 
 // Payloader payload is some part of one hook
 type Payloader interface {
-	SetSecret(string)
 	JSONPayload() ([]byte, error)
 }
 
@@ -89,10 +95,11 @@ type PayloadCommit struct {
 
 // PayloadCommitVerification represents the GPG verification of a commit
 type PayloadCommitVerification struct {
-	Verified  bool   `json:"verified"`
-	Reason    string `json:"reason"`
-	Signature string `json:"signature"`
-	Payload   string `json:"payload"`
+	Verified  bool         `json:"verified"`
+	Reason    string       `json:"reason"`
+	Signature string       `json:"signature"`
+	Signer    *PayloadUser `json:"signer"`
+	Payload   string       `json:"payload"`
 }
 
 var (
@@ -116,17 +123,11 @@ var (
 
 // CreatePayload FIXME
 type CreatePayload struct {
-	Secret  string      `json:"secret"`
 	Sha     string      `json:"sha"`
 	Ref     string      `json:"ref"`
 	RefType string      `json:"ref_type"`
 	Repo    *Repository `json:"repository"`
 	Sender  *User       `json:"sender"`
-}
-
-// SetSecret modifies the secret of the CreatePayload
-func (p *CreatePayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload return payload information
@@ -171,17 +172,11 @@ const (
 
 // DeletePayload represents delete payload
 type DeletePayload struct {
-	Secret     string      `json:"secret"`
 	Ref        string      `json:"ref"`
 	RefType    string      `json:"ref_type"`
 	PusherType PusherType  `json:"pusher_type"`
 	Repo       *Repository `json:"repository"`
 	Sender     *User       `json:"sender"`
-}
-
-// SetSecret modifies the secret of the DeletePayload
-func (p *DeletePayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload implements Payload
@@ -198,15 +193,9 @@ func (p *DeletePayload) JSONPayload() ([]byte, error) {
 
 // ForkPayload represents fork payload
 type ForkPayload struct {
-	Secret string      `json:"secret"`
 	Forkee *Repository `json:"forkee"`
 	Repo   *Repository `json:"repository"`
 	Sender *User       `json:"sender"`
-}
-
-// SetSecret modifies the secret of the ForkPayload
-func (p *ForkPayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload implements Payload
@@ -226,18 +215,13 @@ const (
 
 // IssueCommentPayload represents a payload information of issue comment event.
 type IssueCommentPayload struct {
-	Secret     string                 `json:"secret"`
 	Action     HookIssueCommentAction `json:"action"`
 	Issue      *Issue                 `json:"issue"`
 	Comment    *Comment               `json:"comment"`
 	Changes    *ChangesPayload        `json:"changes,omitempty"`
 	Repository *Repository            `json:"repository"`
 	Sender     *User                  `json:"sender"`
-}
-
-// SetSecret modifies the secret of the IssueCommentPayload
-func (p *IssueCommentPayload) SetSecret(secret string) {
-	p.Secret = secret
+	IsPull     bool                   `json:"is_pull"`
 }
 
 // JSONPayload implements Payload
@@ -264,16 +248,10 @@ const (
 
 // ReleasePayload represents a payload information of release event.
 type ReleasePayload struct {
-	Secret     string            `json:"secret"`
 	Action     HookReleaseAction `json:"action"`
 	Release    *Release          `json:"release"`
 	Repository *Repository       `json:"repository"`
 	Sender     *User             `json:"sender"`
-}
-
-// SetSecret modifies the secret of the ReleasePayload
-func (p *ReleasePayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload implements Payload
@@ -290,7 +268,6 @@ func (p *ReleasePayload) JSONPayload() ([]byte, error) {
 
 // PushPayload represents a payload information of push event.
 type PushPayload struct {
-	Secret     string           `json:"secret"`
 	Ref        string           `json:"ref"`
 	Before     string           `json:"before"`
 	After      string           `json:"after"`
@@ -300,11 +277,6 @@ type PushPayload struct {
 	Repo       *Repository      `json:"repository"`
 	Pusher     *User            `json:"pusher"`
 	Sender     *User            `json:"sender"`
-}
-
-// SetSecret modifies the secret of the PushPayload
-func (p *PushPayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload FIXME
@@ -330,7 +302,7 @@ func ParsePushHook(raw []byte) (*PushPayload, error) {
 
 // Branch returns branch name from a payload
 func (p *PushPayload) Branch() string {
-	return strings.Replace(p.Ref, "refs/heads/", "", -1)
+	return strings.ReplaceAll(p.Ref, "refs/heads/", "")
 }
 
 // .___
@@ -366,22 +338,18 @@ const (
 	HookIssueMilestoned HookIssueAction = "milestoned"
 	// HookIssueDemilestoned is an issue action for when a milestone is cleared on an issue.
 	HookIssueDemilestoned HookIssueAction = "demilestoned"
+	// HookIssueReviewed is an issue action for when a pull request is reviewed
+	HookIssueReviewed HookIssueAction = "reviewed"
 )
 
 // IssuePayload represents the payload information that is sent along with an issue event.
 type IssuePayload struct {
-	Secret     string          `json:"secret"`
 	Action     HookIssueAction `json:"action"`
 	Index      int64           `json:"number"`
 	Changes    *ChangesPayload `json:"changes,omitempty"`
 	Issue      *Issue          `json:"issue"`
 	Repository *Repository     `json:"repository"`
 	Sender     *User           `json:"sender"`
-}
-
-// SetSecret modifies the secret of the IssuePayload.
-func (p *IssuePayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload encodes the IssuePayload to JSON, with an indentation of two spaces.
@@ -394,10 +362,11 @@ type ChangesFromPayload struct {
 	From string `json:"from"`
 }
 
-// ChangesPayload FIXME
+// ChangesPayload represents the payload information of issue change
 type ChangesPayload struct {
 	Title *ChangesFromPayload `json:"title,omitempty"`
 	Body  *ChangesFromPayload `json:"body,omitempty"`
+	Ref   *ChangesFromPayload `json:"ref,omitempty"`
 }
 
 // __________      .__  .__    __________                                     __
@@ -409,23 +378,24 @@ type ChangesPayload struct {
 
 // PullRequestPayload represents a payload information of pull request event.
 type PullRequestPayload struct {
-	Secret      string          `json:"secret"`
 	Action      HookIssueAction `json:"action"`
 	Index       int64           `json:"number"`
 	Changes     *ChangesPayload `json:"changes,omitempty"`
 	PullRequest *PullRequest    `json:"pull_request"`
 	Repository  *Repository     `json:"repository"`
 	Sender      *User           `json:"sender"`
-}
-
-// SetSecret modifies the secret of the PullRequestPayload.
-func (p *PullRequestPayload) SetSecret(secret string) {
-	p.Secret = secret
+	Review      *ReviewPayload  `json:"review"`
 }
 
 // JSONPayload FIXME
 func (p *PullRequestPayload) JSONPayload() ([]byte, error) {
 	return json.MarshalIndent(p, "", "  ")
+}
+
+// ReviewPayload FIXME
+type ReviewPayload struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
 }
 
 //__________                           .__  __
@@ -447,16 +417,10 @@ const (
 
 // RepositoryPayload payload for repository webhooks
 type RepositoryPayload struct {
-	Secret       string         `json:"secret"`
 	Action       HookRepoAction `json:"action"`
 	Repository   *Repository    `json:"repository"`
 	Organization *User          `json:"organization"`
 	Sender       *User          `json:"sender"`
-}
-
-// SetSecret modifies the secret of the RepositoryPayload
-func (p *RepositoryPayload) SetSecret(secret string) {
-	p.Secret = secret
 }
 
 // JSONPayload JSON representation of the payload

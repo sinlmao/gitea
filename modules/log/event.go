@@ -29,6 +29,7 @@ type EventLogger interface {
 	GetLevel() Level
 	GetStacktraceLevel() Level
 	GetName() string
+	ReleaseReopen() error
 }
 
 // ChannelledLog represents a cached channel to a LoggerProvider
@@ -117,6 +118,11 @@ func (l *ChannelledLog) Flush() {
 	l.flush <- true
 }
 
+// ReleaseReopen this ChannelledLog
+func (l *ChannelledLog) ReleaseReopen() error {
+	return l.loggerProvider.ReleaseReopen()
+}
+
 // GetLevel gets the level of this ChannelledLog
 func (l *ChannelledLog) GetLevel() Level {
 	return l.loggerProvider.GetLevel()
@@ -137,7 +143,7 @@ type MultiChannelledLog struct {
 	name            string
 	bufferLength    int64
 	queue           chan *Event
-	mutex           sync.Mutex
+	rwmutex         sync.RWMutex
 	loggers         map[string]EventLogger
 	flush           chan bool
 	close           chan bool
@@ -145,6 +151,7 @@ type MultiChannelledLog struct {
 	level           Level
 	stacktraceLevel Level
 	closed          chan bool
+	paused          chan bool
 }
 
 // NewMultiChannelledLog a new logger instance with given logger provider and config.
@@ -159,16 +166,17 @@ func NewMultiChannelledLog(name string, bufferLength int64) *MultiChannelledLog 
 		stacktraceLevel: NONE,
 		close:           make(chan bool),
 		closed:          make(chan bool),
+		paused:          make(chan bool),
 	}
 	return m
 }
 
 // AddLogger adds a logger to this MultiChannelledLog
 func (m *MultiChannelledLog) AddLogger(logger EventLogger) error {
-	m.mutex.Lock()
+	m.rwmutex.Lock()
 	name := logger.GetName()
 	if _, has := m.loggers[name]; has {
-		m.mutex.Unlock()
+		m.rwmutex.Unlock()
 		return ErrDuplicateName{name}
 	}
 	m.loggers[name] = logger
@@ -178,7 +186,7 @@ func (m *MultiChannelledLog) AddLogger(logger EventLogger) error {
 	if logger.GetStacktraceLevel() < m.stacktraceLevel {
 		m.stacktraceLevel = logger.GetStacktraceLevel()
 	}
-	m.mutex.Unlock()
+	m.rwmutex.Unlock()
 	go m.Start()
 	return nil
 }
@@ -187,15 +195,15 @@ func (m *MultiChannelledLog) AddLogger(logger EventLogger) error {
 // NB: If you delete the last sublogger this logger will simply drop
 // log events
 func (m *MultiChannelledLog) DelLogger(name string) bool {
-	m.mutex.Lock()
+	m.rwmutex.Lock()
 	logger, has := m.loggers[name]
 	if !has {
-		m.mutex.Unlock()
+		m.rwmutex.Unlock()
 		return false
 	}
 	delete(m.loggers, name)
 	m.internalResetLevel()
-	m.mutex.Unlock()
+	m.rwmutex.Unlock()
 	logger.Flush()
 	logger.Close()
 	return true
@@ -203,15 +211,15 @@ func (m *MultiChannelledLog) DelLogger(name string) bool {
 
 // GetEventLogger returns a sub logger from this MultiChannelledLog
 func (m *MultiChannelledLog) GetEventLogger(name string) EventLogger {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
 	return m.loggers[name]
 }
 
 // GetEventLoggerNames returns a list of names
 func (m *MultiChannelledLog) GetEventLoggerNames() []string {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
 	var keys []string
 	for k := range m.loggers {
 		keys = append(keys, k)
@@ -220,49 +228,103 @@ func (m *MultiChannelledLog) GetEventLoggerNames() []string {
 }
 
 func (m *MultiChannelledLog) closeLoggers() {
-	m.mutex.Lock()
+	m.rwmutex.Lock()
 	for _, logger := range m.loggers {
 		logger.Flush()
 		logger.Close()
 	}
-	m.mutex.Unlock()
+	m.rwmutex.Unlock()
 	m.closed <- true
+}
+
+// Pause pauses this Logger
+func (m *MultiChannelledLog) Pause() {
+	m.paused <- true
+}
+
+// Resume resumes this Logger
+func (m *MultiChannelledLog) Resume() {
+	m.paused <- false
+}
+
+// ReleaseReopen causes this logger to tell its subloggers to release and reopen
+func (m *MultiChannelledLog) ReleaseReopen() error {
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
+	var accumulatedErr error
+	for _, logger := range m.loggers {
+		if err := logger.ReleaseReopen(); err != nil {
+			if accumulatedErr == nil {
+				accumulatedErr = fmt.Errorf("Error whilst reopening: %s Error: %v", logger.GetName(), err)
+			} else {
+				accumulatedErr = fmt.Errorf("Error whilst reopening: %s Error: %v & %v", logger.GetName(), err, accumulatedErr)
+			}
+		}
+	}
+	return accumulatedErr
 }
 
 // Start processing the MultiChannelledLog
 func (m *MultiChannelledLog) Start() {
-	m.mutex.Lock()
+	m.rwmutex.Lock()
 	if m.started {
-		m.mutex.Unlock()
+		m.rwmutex.Unlock()
 		return
 	}
 	m.started = true
-	m.mutex.Unlock()
+	m.rwmutex.Unlock()
+	paused := false
 	for {
+		if paused {
+			select {
+			case paused = <-m.paused:
+				if !paused {
+					m.ResetLevel()
+				}
+			case _, ok := <-m.flush:
+				if !ok {
+					m.closeLoggers()
+					return
+				}
+				m.rwmutex.RLock()
+				for _, logger := range m.loggers {
+					logger.Flush()
+				}
+				m.rwmutex.RUnlock()
+			case <-m.close:
+				m.closeLoggers()
+				return
+			}
+			continue
+		}
 		select {
+		case paused = <-m.paused:
+			if paused && m.level < INFO {
+				m.level = INFO
+			}
 		case event, ok := <-m.queue:
 			if !ok {
 				m.closeLoggers()
 				return
 			}
-			m.mutex.Lock()
+			m.rwmutex.RLock()
 			for _, logger := range m.loggers {
 				err := logger.LogEvent(event)
 				if err != nil {
 					fmt.Println(err)
 				}
 			}
-			m.mutex.Unlock()
+			m.rwmutex.RUnlock()
 		case _, ok := <-m.flush:
 			if !ok {
 				m.closeLoggers()
 				return
 			}
-			m.mutex.Lock()
+			m.rwmutex.RLock()
 			for _, logger := range m.loggers {
 				logger.Flush()
 			}
-			m.mutex.Unlock()
+			m.rwmutex.RUnlock()
 		case <-m.close:
 			m.closeLoggers()
 			return
@@ -275,7 +337,7 @@ func (m *MultiChannelledLog) LogEvent(event *Event) error {
 	select {
 	case m.queue <- event:
 		return nil
-	case <-time.After(60 * time.Second):
+	case <-time.After(100 * time.Millisecond):
 		// We're blocked!
 		return ErrTimeout{
 			Name:     m.name,
@@ -297,11 +359,15 @@ func (m *MultiChannelledLog) Flush() {
 
 // GetLevel gets the level of this MultiChannelledLog
 func (m *MultiChannelledLog) GetLevel() Level {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
 	return m.level
 }
 
 // GetStacktraceLevel gets the level of this MultiChannelledLog
 func (m *MultiChannelledLog) GetStacktraceLevel() Level {
+	m.rwmutex.RLock()
+	defer m.rwmutex.RUnlock()
 	return m.stacktraceLevel
 }
 
@@ -322,8 +388,8 @@ func (m *MultiChannelledLog) internalResetLevel() Level {
 
 // ResetLevel will reset the level of this MultiChannelledLog
 func (m *MultiChannelledLog) ResetLevel() Level {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.rwmutex.Lock()
+	defer m.rwmutex.Unlock()
 	return m.internalResetLevel()
 }
 

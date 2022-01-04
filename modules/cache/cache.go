@@ -8,26 +8,84 @@ import (
 	"fmt"
 	"strconv"
 
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 
-	mc "gitea.com/macaron/cache"
+	mc "gitea.com/go-chi/cache"
+
+	_ "gitea.com/go-chi/cache/memcache" // memcache plugin for cache
 )
 
-var conn mc.Cache
+var (
+	conn mc.Cache
+)
+
+func newCache(cacheConfig setting.Cache) (mc.Cache, error) {
+	return mc.NewCacher(mc.Options{
+		Adapter:       cacheConfig.Adapter,
+		AdapterConfig: cacheConfig.Conn,
+		Interval:      cacheConfig.Interval,
+	})
+}
 
 // NewContext start cache service
 func NewContext() error {
-	if setting.CacheService == nil || conn != nil {
-		return nil
+	var err error
+
+	if conn == nil && setting.CacheService.Enabled {
+		if conn, err = newCache(setting.CacheService.Cache); err != nil {
+			return err
+		}
+		const testKey = "__gitea_cache_test"
+		const testVal = "test-value"
+		if err = conn.Put(testKey, testVal, 10); err != nil {
+			return err
+		}
+		val := conn.Get(testKey)
+		if valStr, ok := val.(string); !ok || valStr != testVal {
+			// If the cache is full, the Get may not read the expected value stored by Put.
+			// Since we have checked that Put can success, so we just show a warning here, do not return an error to panic.
+			log.Warn("cache (adapter:%s, config:%s) doesn't seem to work correctly, set test value '%v' but get '%v'",
+				setting.CacheService.Cache.Adapter, setting.CacheService.Cache.Conn,
+				testVal, val,
+			)
+		}
 	}
 
-	var err error
-	conn, err = mc.NewCacher(setting.CacheService.Adapter, mc.Options{
-		Adapter:       setting.CacheService.Adapter,
-		AdapterConfig: setting.CacheService.Conn,
-		Interval:      setting.CacheService.Interval,
-	})
 	return err
+}
+
+// GetCache returns the currently configured cache
+func GetCache() mc.Cache {
+	return conn
+}
+
+// GetString returns the key value from cache with callback when no key exists in cache
+func GetString(key string, getFunc func() (string, error)) (string, error) {
+	if conn == nil || setting.CacheService.TTL == 0 {
+		return getFunc()
+	}
+	if !conn.IsExist(key) {
+		var (
+			value string
+			err   error
+		)
+		if value, err = getFunc(); err != nil {
+			return value, err
+		}
+		err = conn.Put(key, value, setting.CacheService.TTLSeconds())
+		if err != nil {
+			return "", err
+		}
+	}
+	value := conn.Get(key)
+	if v, ok := value.(string); ok {
+		return v, nil
+	}
+	if v, ok := value.(fmt.Stringer); ok {
+		return v.String(), nil
+	}
+	return fmt.Sprintf("%s", conn.Get(key)), nil
 }
 
 // GetInt returns key value from cache with callback when no key exists in cache
@@ -43,7 +101,7 @@ func GetInt(key string, getFunc func() (int, error)) (int, error) {
 		if value, err = getFunc(); err != nil {
 			return value, err
 		}
-		err = conn.Put(key, value, int64(setting.CacheService.TTL.Seconds()))
+		err = conn.Put(key, value, setting.CacheService.TTLSeconds())
 		if err != nil {
 			return 0, err
 		}
@@ -75,7 +133,7 @@ func GetInt64(key string, getFunc func() (int64, error)) (int64, error) {
 		if value, err = getFunc(); err != nil {
 			return value, err
 		}
-		err = conn.Put(key, value, int64(setting.CacheService.TTL.Seconds()))
+		err = conn.Put(key, value, setting.CacheService.TTLSeconds())
 		if err != nil {
 			return 0, err
 		}

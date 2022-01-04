@@ -7,11 +7,10 @@ package migrations
 import (
 	"code.gitea.io/gitea/modules/setting"
 
-	"github.com/go-xorm/xorm"
+	"xorm.io/xorm"
 )
 
 func addCanCloseIssuesViaCommitInAnyBranch(x *xorm.Engine) error {
-
 	type Repository struct {
 		ID                              int64 `xorm:"pk autoincr"`
 		CloseIssuesViaCommitInAnyBranch bool  `xorm:"NOT NULL DEFAULT false"`

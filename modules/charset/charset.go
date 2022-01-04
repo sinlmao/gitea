@@ -7,18 +7,48 @@ package charset
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"strings"
 	"unicode/utf8"
 
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/util"
 
-	"github.com/gogits/chardet"
+	"github.com/gogs/chardet"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/transform"
 )
 
 // UTF8BOM is the utf-8 byte-order marker
 var UTF8BOM = []byte{'\xef', '\xbb', '\xbf'}
+
+// ToUTF8WithFallbackReader detects the encoding of content and coverts to UTF-8 reader if possible
+func ToUTF8WithFallbackReader(rd io.Reader) io.Reader {
+	var buf = make([]byte, 2048)
+	n, err := util.ReadAtMost(rd, buf)
+	if err != nil {
+		return io.MultiReader(bytes.NewReader(RemoveBOMIfPresent(buf[:n])), rd)
+	}
+
+	charsetLabel, err := DetectEncoding(buf[:n])
+	if err != nil || charsetLabel == "UTF-8" {
+		return io.MultiReader(bytes.NewReader(RemoveBOMIfPresent(buf[:n])), rd)
+	}
+
+	encoding, _ := charset.Lookup(charsetLabel)
+	if encoding == nil {
+		return io.MultiReader(bytes.NewReader(buf[:n]), rd)
+	}
+
+	return transform.NewReader(
+		io.MultiReader(
+			bytes.NewReader(RemoveBOMIfPresent(buf[:n])),
+			rd,
+		),
+		encoding.NewDecoder(),
+	)
+}
 
 // ToUTF8WithErr converts content to UTF8 encoding
 func ToUTF8WithErr(content []byte) (string, error) {
@@ -35,7 +65,7 @@ func ToUTF8WithErr(content []byte) (string, error) {
 	}
 
 	// If there is an error, we concatenate the nicely decoded part and the
-	// original left over. This way we won't lose data.
+	// original left over. This way we won't lose much data.
 	result, n, err := transform.Bytes(encoding.NewDecoder(), content)
 	if err != nil {
 		result = append(result, content[n:]...)
@@ -48,24 +78,8 @@ func ToUTF8WithErr(content []byte) (string, error) {
 
 // ToUTF8WithFallback detects the encoding of content and coverts to UTF-8 if possible
 func ToUTF8WithFallback(content []byte) []byte {
-	charsetLabel, err := DetectEncoding(content)
-	if err != nil || charsetLabel == "UTF-8" {
-		return RemoveBOMIfPresent(content)
-	}
-
-	encoding, _ := charset.Lookup(charsetLabel)
-	if encoding == nil {
-		return content
-	}
-
-	// If there is an error, we concatenate the nicely decoded part and the
-	// original left over. This way we won't lose data.
-	result, n, err := transform.Bytes(encoding.NewDecoder(), content)
-	if err != nil {
-		return append(result, content[n:]...)
-	}
-
-	return RemoveBOMIfPresent(result)
+	bs, _ := io.ReadAll(ToUTF8WithFallbackReader(bytes.NewReader(content)))
+	return bs
 }
 
 // ToUTF8 converts content to UTF8 encoding and ignore error
@@ -137,16 +151,42 @@ func DetectEncoding(content []byte) (string, error) {
 	} else {
 		detectContent = content
 	}
-	result, err := textDetector.DetectBest(detectContent)
+
+	// Now we can't use DetectBest or just results[0] because the result isn't stable - so we need a tie break
+	results, err := textDetector.DetectAll(detectContent)
 	if err != nil {
+		if err == chardet.NotDetectedError && len(setting.Repository.AnsiCharset) > 0 {
+			log.Debug("Using default AnsiCharset: %s", setting.Repository.AnsiCharset)
+			return setting.Repository.AnsiCharset, nil
+		}
 		return "", err
 	}
+
+	topConfidence := results[0].Confidence
+	topResult := results[0]
+	priority, has := setting.Repository.DetectedCharsetScore[strings.ToLower(strings.TrimSpace(topResult.Charset))]
+	for _, result := range results {
+		// As results are sorted in confidence order - if we have a different confidence
+		// we know it's less than the current confidence and can break out of the loop early
+		if result.Confidence != topConfidence {
+			break
+		}
+
+		// Otherwise check if this results is earlier in the DetectedCharsetOrder than our current top guesss
+		resultPriority, resultHas := setting.Repository.DetectedCharsetScore[strings.ToLower(strings.TrimSpace(result.Charset))]
+		if resultHas && (!has || resultPriority < priority) {
+			topResult = result
+			priority = resultPriority
+			has = true
+		}
+	}
+
 	// FIXME: to properly decouple this function the fallback ANSI charset should be passed as an argument
-	if result.Charset != "UTF-8" && len(setting.Repository.AnsiCharset) > 0 {
+	if topResult.Charset != "UTF-8" && len(setting.Repository.AnsiCharset) > 0 {
 		log.Debug("Using default AnsiCharset: %s", setting.Repository.AnsiCharset)
 		return setting.Repository.AnsiCharset, err
 	}
 
-	log.Debug("Detected encoding: %s", result.Charset)
-	return result.Charset, err
+	log.Debug("Detected encoding: %s", topResult.Charset)
+	return topResult.Charset, err
 }

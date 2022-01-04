@@ -6,9 +6,11 @@
 package log
 
 import (
-	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+
+	"code.gitea.io/gitea/modules/json"
 )
 
 // CanColorStdout reports if we can color the Stdout
@@ -52,7 +54,7 @@ func NewConsoleLogger() LoggerProvider {
 func (log *ConsoleLogger) Init(config string) error {
 	err := json.Unmarshal([]byte(config), log)
 	if err != nil {
-		return err
+		return fmt.Errorf("Unable to parse JSON: %v", err)
 	}
 	if log.Stderr {
 		log.NewWriterLogger(&nopWriteCloser{
@@ -66,6 +68,20 @@ func (log *ConsoleLogger) Init(config string) error {
 
 // Flush when log should be flushed
 func (log *ConsoleLogger) Flush() {
+}
+
+// ReleaseReopen causes the console logger to reconnect to os.Stdout
+func (log *ConsoleLogger) ReleaseReopen() error {
+	if log.Stderr {
+		log.NewWriterLogger(&nopWriteCloser{
+			w: os.Stderr,
+		})
+	} else {
+		log.NewWriterLogger(&nopWriteCloser{
+			w: os.Stdout,
+		})
+	}
+	return nil
 }
 
 // GetName returns the default name for this implementation

@@ -7,11 +7,11 @@ package migrations
 import (
 	"fmt"
 
-	"code.gitea.io/gitea/modules/generate"
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/timeutil"
+	"code.gitea.io/gitea/modules/util"
 
-	"github.com/go-xorm/xorm"
+	"xorm.io/xorm"
 )
 
 func hashAppToken(x *xorm.Engine) error {
@@ -65,7 +65,7 @@ func hashAppToken(x *xorm.Engine) error {
 
 		for _, token := range tokens {
 			// generate salt
-			salt, err := generate.GetRandomString(10)
+			salt, err := util.RandomString(10)
 			if err != nil {
 				return err
 			}

@@ -5,17 +5,83 @@
 package setting
 
 import (
-	"encoding/json"
+	"fmt"
 	golog "log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/log"
 
 	ini "gopkg.in/ini.v1"
 )
+
+var filenameSuffix = ""
+var descriptionLock = sync.RWMutex{}
+var logDescriptions = make(map[string]*LogDescription)
+
+// GetLogDescriptions returns a race safe set of descriptions
+func GetLogDescriptions() map[string]*LogDescription {
+	descriptionLock.RLock()
+	defer descriptionLock.RUnlock()
+	descs := make(map[string]*LogDescription, len(logDescriptions))
+	for k, v := range logDescriptions {
+		subLogDescriptions := make([]SubLogDescription, len(v.SubLogDescriptions))
+		for i, s := range v.SubLogDescriptions {
+			subLogDescriptions[i] = s
+		}
+		descs[k] = &LogDescription{
+			Name:               v.Name,
+			SubLogDescriptions: subLogDescriptions,
+		}
+	}
+	return descs
+}
+
+// AddLogDescription adds a set of descriptions to the complete description
+func AddLogDescription(key string, description *LogDescription) {
+	descriptionLock.Lock()
+	defer descriptionLock.Unlock()
+	logDescriptions[key] = description
+}
+
+// AddSubLogDescription adds a sub log description
+func AddSubLogDescription(key string, subLogDescription SubLogDescription) bool {
+	descriptionLock.Lock()
+	defer descriptionLock.Unlock()
+	desc, ok := logDescriptions[key]
+	if !ok {
+		return false
+	}
+	for i, sub := range desc.SubLogDescriptions {
+		if sub.Name == subLogDescription.Name {
+			desc.SubLogDescriptions[i] = subLogDescription
+			return true
+		}
+	}
+	desc.SubLogDescriptions = append(desc.SubLogDescriptions, subLogDescription)
+	return true
+}
+
+// RemoveSubLogDescription removes a sub log description
+func RemoveSubLogDescription(key, name string) bool {
+	descriptionLock.Lock()
+	defer descriptionLock.Unlock()
+	desc, ok := logDescriptions[key]
+	if !ok {
+		return false
+	}
+	for i, sub := range desc.SubLogDescriptions {
+		if sub.Name == name {
+			desc.SubLogDescriptions = append(desc.SubLogDescriptions[:i], desc.SubLogDescriptions[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
 
 type defaultLogOptions struct {
 	levelName      string // LogLevel
@@ -27,7 +93,7 @@ type defaultLogOptions struct {
 
 func newDefaultLogOptions() defaultLogOptions {
 	return defaultLogOptions{
-		levelName:      LogLevel,
+		levelName:      LogLevel.String(),
 		flags:          "stdflags",
 		filename:       filepath.Join(LogRootPath, "gitea.log"),
 		bufferLength:   10000,
@@ -48,19 +114,18 @@ type LogDescription struct {
 	SubLogDescriptions []SubLogDescription
 }
 
-func getLogLevel(section *ini.Section, key string, defaultValue string) string {
-	value := section.Key(key).MustString("info")
-	return log.FromString(value).String()
+func getLogLevel(section *ini.Section, key string, defaultValue log.Level) log.Level {
+	value := section.Key(key).MustString(defaultValue.String())
+	return log.FromString(value)
 }
 
-func getStacktraceLogLevel(section *ini.Section, key string, defaultValue string) string {
-	value := section.Key(key).MustString("none")
+func getStacktraceLogLevel(section *ini.Section, key, defaultValue string) string {
+	value := section.Key(key).MustString(defaultValue)
 	return log.FromString(value).String()
 }
 
 func generateLogConfig(sec *ini.Section, name string, defaults defaultLogOptions) (mode, jsonConfig, levelName string) {
-	levelName = getLogLevel(sec, "LEVEL", LogLevel)
-	level := log.FromString(levelName)
+	level := getLogLevel(sec, "LEVEL", LogLevel)
 	stacktraceLevelName := getStacktraceLogLevel(sec, "STACKTRACE_LEVEL", StacktraceLogLevel)
 	stacktraceLevel := log.FromString(stacktraceLevelName)
 	mode = name
@@ -112,7 +177,7 @@ func generateLogConfig(sec *ini.Section, name string, defaults defaultLogOptions
 			panic(err.Error())
 		}
 
-		logConfig["filename"] = logPath
+		logConfig["filename"] = logPath + filenameSuffix
 		logConfig["rotate"] = sec.Key("LOG_ROTATE").MustBool(true)
 		logConfig["maxsize"] = 1 << uint(sec.Key("MAX_SIZE_SHIFT").MustInt(28))
 		logConfig["daily"] = sec.Key("DAILY_ROTATE").MustBool(true)
@@ -128,12 +193,15 @@ func generateLogConfig(sec *ini.Section, name string, defaults defaultLogOptions
 		logConfig["username"] = sec.Key("USER").MustString("example@example.com")
 		logConfig["password"] = sec.Key("PASSWD").MustString("******")
 		logConfig["host"] = sec.Key("HOST").MustString("127.0.0.1:25")
-		logConfig["sendTos"] = sec.Key("RECEIVERS").MustString("[]")
+		sendTos := strings.Split(sec.Key("RECEIVERS").MustString(""), ",")
+		for i, address := range sendTos {
+			sendTos[i] = strings.TrimSpace(address)
+		}
+		logConfig["sendTos"] = sendTos
 		logConfig["subject"] = sec.Key("SUBJECT").MustString("Diagnostic message from Gitea")
 	}
 
 	logConfig["colorize"] = sec.Key("COLORIZE").MustBool(false)
-
 	byteConfig, err := json.Marshal(logConfig)
 	if err != nil {
 		log.Error("Failed to marshal log configuration: %v %v", logConfig, err)
@@ -178,26 +246,15 @@ func generateNamedLogger(key string, options defaultLogOptions) *LogDescription 
 		log.Info("%s Log: %s(%s:%s)", strings.Title(key), strings.Title(name), provider, levelName)
 	}
 
-	LogDescriptions[key] = &description
+	AddLogDescription(key, &description)
 
 	return &description
-}
-
-func newMacaronLogService() {
-	options := newDefaultLogOptions()
-	options.filename = filepath.Join(LogRootPath, "macaron.log")
-	options.bufferLength = Cfg.Section("log").Key("BUFFER_LEN").MustInt64(10000)
-
-	Cfg.Section("log").Key("MACARON").MustString("file")
-	if RedirectMacaronLog {
-		generateNamedLogger("macaron", options)
-	}
 }
 
 func newAccessLogService() {
 	EnableAccessLog = Cfg.Section("log").Key("ENABLE_ACCESS_LOG").MustBool(false)
 	AccessLogTemplate = Cfg.Section("log").Key("ACCESS_LOG_TEMPLATE").MustString(
-		`{{.Ctx.RemoteAddr}} - {{.Identity}} {{.Start.Format "[02/Jan/2006:15:04:05 -0700]" }} "{{.Ctx.Req.Method}} {{.Ctx.Req.RequestURI}} {{.Ctx.Req.Proto}}" {{.ResponseWriter.Status}} {{.ResponseWriter.Size}} "{{.Ctx.Req.Referer}}\" \"{{.Ctx.Req.UserAgent}}"`)
+		`{{.Ctx.RemoteAddr}} - {{.Identity}} {{.Start.Format "[02/Jan/2006:15:04:05 -0700]" }} "{{.Ctx.Req.Method}} {{.Ctx.Req.URL.RequestURI}} {{.Ctx.Req.Proto}}" {{.ResponseWriter.Status}} {{.ResponseWriter.Size}} "{{.Ctx.Req.Referer}}\" \"{{.Ctx.Req.UserAgent}}"`)
 	Cfg.Section("log").Key("ACCESS").MustString("file")
 	if EnableAccessLog {
 		options := newDefaultLogOptions()
@@ -213,7 +270,7 @@ func newRouterLogService() {
 	// Allow [log]  DISABLE_ROUTER_LOG to override [server] DISABLE_ROUTER_LOG
 	DisableRouterLog = Cfg.Section("log").Key("DISABLE_ROUTER_LOG").MustBool(DisableRouterLog)
 
-	if !DisableRouterLog && RedirectMacaronLog {
+	if !DisableRouterLog {
 		options := newDefaultLogOptions()
 		options.filename = filepath.Join(LogRootPath, "router.log")
 		options.flags = "date,time" // For the router we don't want any prefixed flags
@@ -227,6 +284,7 @@ func newLogService() {
 
 	options := newDefaultLogOptions()
 	options.bufferLength = Cfg.Section("log").Key("BUFFER_LEN").MustInt64(10000)
+	EnableSSHLog = Cfg.Section("log").Key("ENABLE_SSH_LOG").MustBool(false)
 
 	description := LogDescription{
 		Name: log.DEFAULT,
@@ -254,9 +312,12 @@ func newLogService() {
 			continue
 		}
 
-		sec, err := Cfg.GetSection("log." + name)
+		sec, err := Cfg.GetSection("log." + name + ".default")
 		if err != nil {
-			sec, _ = Cfg.NewSection("log." + name)
+			sec, err = Cfg.GetSection("log." + name)
+			if err != nil {
+				sec, _ = Cfg.NewSection("log." + name)
+			}
 		}
 
 		provider, config, levelName := generateLogConfig(sec, name, options)
@@ -269,7 +330,7 @@ func newLogService() {
 		log.Info("Gitea Log Mode: %s(%s:%s)", strings.Title(name), strings.Title(provider), levelName)
 	}
 
-	LogDescriptions[log.DEFAULT] = &description
+	AddLogDescription(log.DEFAULT, &description)
 
 	// Finally redirect the default golog to here
 	golog.SetFlags(0)
@@ -277,10 +338,15 @@ func newLogService() {
 	golog.SetOutput(log.NewLoggerAsWriter("INFO", log.GetLogger(log.DEFAULT)))
 }
 
+// RestartLogsWithPIDSuffix restarts the logs with a PID suffix on files
+func RestartLogsWithPIDSuffix() {
+	filenameSuffix = fmt.Sprintf(".%d", os.Getpid())
+	NewLogServices(false)
+}
+
 // NewLogServices creates all the log services
 func NewLogServices(disableConsole bool) {
 	newLogService()
-	newMacaronLogService()
 	newRouterLogService()
 	newAccessLogService()
 	NewXORMLogService(disableConsole)

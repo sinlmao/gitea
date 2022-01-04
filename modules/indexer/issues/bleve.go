@@ -9,14 +9,18 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/blevesearch/bleve"
-	"github.com/blevesearch/bleve/analysis/analyzer/custom"
-	"github.com/blevesearch/bleve/analysis/token/lowercase"
-	"github.com/blevesearch/bleve/analysis/token/unicodenorm"
-	"github.com/blevesearch/bleve/analysis/tokenizer/unicode"
-	"github.com/blevesearch/bleve/index/upsidedown"
-	"github.com/blevesearch/bleve/mapping"
-	"github.com/blevesearch/bleve/search/query"
+	gitea_bleve "code.gitea.io/gitea/modules/indexer/bleve"
+	"code.gitea.io/gitea/modules/log"
+	"code.gitea.io/gitea/modules/util"
+
+	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
+	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
+	"github.com/blevesearch/bleve/v2/analysis/token/unicodenorm"
+	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
+	"github.com/blevesearch/bleve/v2/index/upsidedown"
+	"github.com/blevesearch/bleve/v2/mapping"
+	"github.com/blevesearch/bleve/v2/search/query"
 	"github.com/ethantkoenig/rupture"
 )
 
@@ -85,14 +89,14 @@ func openIndexer(path string, latestVersion int) (bleve.Index, error) {
 	if metadata.Version < latestVersion {
 		// the indexer is using a previous version, so we should delete it and
 		// re-populate
-		return nil, os.RemoveAll(path)
+		return nil, util.RemoveAll(path)
 	}
 
 	index, err := bleve.Open(path)
 	if err != nil && err == upsidedown.IncompatibleVersion {
 		// the indexer was built with a previous version of bleve, so we should
 		// delete it and re-populate
-		return nil, os.RemoveAll(path)
+		return nil, util.RemoveAll(path)
 	} else if err != nil {
 		return nil, err
 	}
@@ -169,7 +173,7 @@ func NewBleveIndexer(indexDir string) *BleveIndexer {
 	}
 }
 
-// Init will initial the indexer
+// Init will initialize the indexer
 func (b *BleveIndexer) Init() (bool, error) {
 	var err error
 	b.indexer, err = openIndexer(b.indexDir, issueIndexerLatestVersion)
@@ -184,9 +188,18 @@ func (b *BleveIndexer) Init() (bool, error) {
 	return false, err
 }
 
+// Close will close the bleve indexer
+func (b *BleveIndexer) Close() {
+	if b.indexer != nil {
+		if err := b.indexer.Close(); err != nil {
+			log.Error("Error whilst closing indexer: %v", err)
+		}
+	}
+}
+
 // Index will save the index data
 func (b *BleveIndexer) Index(issues []*IndexerData) error {
-	batch := rupture.NewFlushingBatch(b.indexer, maxBatchSize)
+	batch := gitea_bleve.NewFlushingBatch(b.indexer, maxBatchSize)
 	for _, issue := range issues {
 		if err := batch.Index(indexerID(issue.ID), struct {
 			RepoID   int64
@@ -207,7 +220,7 @@ func (b *BleveIndexer) Index(issues []*IndexerData) error {
 
 // Delete deletes indexes by ids
 func (b *BleveIndexer) Delete(ids ...int64) error {
-	batch := rupture.NewFlushingBatch(b.indexer, maxBatchSize)
+	batch := gitea_bleve.NewFlushingBatch(b.indexer, maxBatchSize)
 	for _, id := range ids {
 		if err := batch.Delete(indexerID(id)); err != nil {
 			return err
@@ -218,15 +231,25 @@ func (b *BleveIndexer) Delete(ids ...int64) error {
 
 // Search searches for issues by given conditions.
 // Returns the matching issue IDs
-func (b *BleveIndexer) Search(keyword string, repoID int64, limit, start int) (*SearchResult, error) {
+func (b *BleveIndexer) Search(keyword string, repoIDs []int64, limit, start int) (*SearchResult, error) {
+	var repoQueriesP []*query.NumericRangeQuery
+	for _, repoID := range repoIDs {
+		repoQueriesP = append(repoQueriesP, numericEqualityQuery(repoID, "RepoID"))
+	}
+	repoQueries := make([]query.Query, len(repoQueriesP))
+	for i, v := range repoQueriesP {
+		repoQueries[i] = query.Query(v)
+	}
+
 	indexerQuery := bleve.NewConjunctionQuery(
-		numericEqualityQuery(repoID, "RepoID"),
+		bleve.NewDisjunctionQuery(repoQueries...),
 		bleve.NewDisjunctionQuery(
 			newMatchPhraseQuery(keyword, "Title", issueIndexerAnalyzer),
 			newMatchPhraseQuery(keyword, "Content", issueIndexerAnalyzer),
 			newMatchPhraseQuery(keyword, "Comments", issueIndexerAnalyzer),
 		))
 	search := bleve.NewSearchRequestOptions(indexerQuery, limit, start, false)
+	search.SortBy([]string{"-_score"})
 
 	result, err := b.indexer.Search(search)
 	if err != nil {
@@ -242,8 +265,7 @@ func (b *BleveIndexer) Search(keyword string, repoID int64, limit, start int) (*
 			return nil, err
 		}
 		ret.Hits = append(ret.Hits, Match{
-			ID:     id,
-			RepoID: repoID,
+			ID: id,
 		})
 	}
 	return &ret, nil

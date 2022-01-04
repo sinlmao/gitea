@@ -14,8 +14,11 @@ type FileOptions struct {
 	// new_branch (optional) will make a new branch from `branch` before creating the file
 	NewBranchName string `json:"new_branch" binding:"GitRefName;MaxSize(100)"`
 	// `author` and `committer` are optional (if only one is given, it will be used for the other, otherwise the authenticated user will be used)
-	Author    Identity `json:"author"`
-	Committer Identity `json:"committer"`
+	Author    Identity          `json:"author"`
+	Committer Identity          `json:"committer"`
+	Dates     CommitDateOptions `json:"dates"`
+	// Add a Signed-off-by trailer by the committer at the end of the commit log message.
+	Signoff bool `json:"signoff"`
 }
 
 // CreateFileOptions options for creating files

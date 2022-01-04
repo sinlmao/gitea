@@ -8,14 +8,15 @@ import (
 	"net/http"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestXSSUserFullName(t *testing.T) {
-	prepareTestEnv(t)
-	user := models.AssertExistsAndLoadBean(t, &models.User{ID: 2}).(*models.User)
+	defer prepareTestEnv(t)()
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2}).(*user_model.User)
 	const fullName = `name & <script class="evil">alert('Oh no!');</script>`
 
 	session := loginUser(t, user.Name)
@@ -24,7 +25,7 @@ func TestXSSUserFullName(t *testing.T) {
 		"name":      user.Name,
 		"full_name": fullName,
 		"email":     user.Email,
-		"language":  "en-us",
+		"language":  "en-US",
 	})
 	session.MakeRequest(t, req, http.StatusFound)
 

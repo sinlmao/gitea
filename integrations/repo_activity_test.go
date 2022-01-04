@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"code.gitea.io/gitea/models"
+	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/modules/test"
 
 	"github.com/stretchr/testify/assert"
@@ -27,7 +27,7 @@ func TestRepoActivity(t *testing.T) {
 		resp := testPullCreate(t, session, "user1", "repo1", "master", "This is a pull title")
 		elem := strings.Split(test.RedirectURL(resp), "/")
 		assert.EqualValues(t, "pulls", elem[3])
-		testPullMerge(t, session, elem[1], elem[2], elem[4], models.MergeStyleMerge)
+		testPullMerge(t, session, elem[1], elem[2], elem[4], repo_model.MergeStyleMerge)
 
 		testEditFileToNewBranch(t, session, "user1", "repo1", "master", "feat/better_readme", "README.md", "Hello, World (Edited Again)\n")
 		testPullCreate(t, session, "user1", "repo1", "feat/better_readme", "This is a pull title")
@@ -56,7 +56,7 @@ func TestRepoActivity(t *testing.T) {
 		list = htmlDoc.doc.Find("#merged-pull-requests").Next().Find("p.desc")
 		assert.Len(t, list.Nodes, 1)
 
-		// Should be 2 merged proposed pull requests
+		// Should be 2 proposed pull requests
 		list = htmlDoc.doc.Find("#proposed-pull-requests").Next().Find("p.desc")
 		assert.Len(t, list.Nodes, 2)
 

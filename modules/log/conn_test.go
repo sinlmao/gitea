@@ -6,7 +6,7 @@ package log
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -20,15 +20,13 @@ func listenReadAndClose(t *testing.T, l net.Listener, expected string) {
 	conn, err := l.Accept()
 	assert.NoError(t, err)
 	defer conn.Close()
-	written, err := ioutil.ReadAll(conn)
+	written, err := io.ReadAll(conn)
 
 	assert.NoError(t, err)
 	assert.Equal(t, expected, string(written))
 }
 
 func TestConnLogger(t *testing.T) {
-	var written []byte
-
 	protocol := "tcp"
 	address := ":3099"
 
@@ -79,8 +77,6 @@ func TestConnLogger(t *testing.T) {
 	}()
 	wg.Wait()
 
-	written = written[:0]
-
 	event.level = WARN
 	expected = fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)
 	wg.Add(2)
@@ -102,7 +98,8 @@ func TestConnLoggerBadConfig(t *testing.T) {
 	logger := NewConn()
 
 	err := logger.Init("{")
-	assert.Equal(t, "unexpected end of JSON input", err.Error())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "Unable to parse JSON")
 	logger.Close()
 }
 
@@ -156,8 +153,6 @@ func TestConnLoggerFailConnect(t *testing.T) {
 }
 
 func TestConnLoggerClose(t *testing.T) {
-	var written []byte
-
 	protocol := "tcp"
 	address := ":3099"
 
@@ -216,8 +211,6 @@ func TestConnLoggerClose(t *testing.T) {
 	assert.Equal(t, flags, connLogger.Flags)
 	assert.Equal(t, level, connLogger.Level)
 	assert.Equal(t, level, logger.GetLevel())
-
-	written = written[:0]
 
 	event.level = WARN
 	expected = fmt.Sprintf("%s%s %s:%d:%s [%c] %s\n", prefix, dateString, event.filename, event.line, event.caller, strings.ToUpper(event.level.String())[0], event.msg)

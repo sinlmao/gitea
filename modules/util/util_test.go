@@ -5,9 +5,9 @@
 package util
 
 import (
+	"regexp"
+	"strings"
 	"testing"
-
-	"code.gitea.io/gitea/modules/setting"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -45,39 +45,6 @@ func TestURLJoin(t *testing.T) {
 	}
 }
 
-func TestIsExternalURL(t *testing.T) {
-	setting.AppURL = "https://try.gitea.io"
-	type test struct {
-		Expected bool
-		RawURL   string
-	}
-	newTest := func(expected bool, rawURL string) test {
-		return test{Expected: expected, RawURL: rawURL}
-	}
-	for _, test := range []test{
-		newTest(false,
-			"https://try.gitea.io"),
-		newTest(true,
-			"https://example.com/"),
-		newTest(true,
-			"//example.com"),
-		newTest(true,
-			"http://example.com"),
-		newTest(false,
-			"a/"),
-		newTest(false,
-			"https://try.gitea.io/test?param=false"),
-		newTest(false,
-			"test?param=false"),
-		newTest(false,
-			"//try.gitea.io/test?param=false"),
-		newTest(false,
-			"/hey/hey/hey#3244"),
-	} {
-		assert.Equal(t, test.Expected, IsExternalURL(test.RawURL))
-	}
-}
-
 func TestIsEmptyString(t *testing.T) {
 
 	cases := []struct {
@@ -93,4 +60,112 @@ func TestIsEmptyString(t *testing.T) {
 	for _, v := range cases {
 		assert.Equal(t, v.expected, IsEmptyString(v.s))
 	}
+}
+
+func Test_NormalizeEOL(t *testing.T) {
+	data1 := []string{
+		"",
+		"This text starts with empty lines",
+		"another",
+		"",
+		"",
+		"",
+		"Some other empty lines in the middle",
+		"more.",
+		"And more.",
+		"Ends with empty lines too.",
+		"",
+		"",
+		"",
+	}
+
+	data2 := []string{
+		"This text does not start with empty lines",
+		"another",
+		"",
+		"",
+		"",
+		"Some other empty lines in the middle",
+		"more.",
+		"And more.",
+		"Ends without EOLtoo.",
+	}
+
+	buildEOLData := func(data []string, eol string) []byte {
+		return []byte(strings.Join(data, eol))
+	}
+
+	dos := buildEOLData(data1, "\r\n")
+	unix := buildEOLData(data1, "\n")
+	mac := buildEOLData(data1, "\r")
+
+	assert.Equal(t, unix, NormalizeEOL(dos))
+	assert.Equal(t, unix, NormalizeEOL(mac))
+	assert.Equal(t, unix, NormalizeEOL(unix))
+
+	dos = buildEOLData(data2, "\r\n")
+	unix = buildEOLData(data2, "\n")
+	mac = buildEOLData(data2, "\r")
+
+	assert.Equal(t, unix, NormalizeEOL(dos))
+	assert.Equal(t, unix, NormalizeEOL(mac))
+	assert.Equal(t, unix, NormalizeEOL(unix))
+
+	assert.Equal(t, []byte("one liner"), NormalizeEOL([]byte("one liner")))
+	assert.Equal(t, []byte("\n"), NormalizeEOL([]byte("\n")))
+	assert.Equal(t, []byte("\ntwo liner"), NormalizeEOL([]byte("\ntwo liner")))
+	assert.Equal(t, []byte("two liner\n"), NormalizeEOL([]byte("two liner\n")))
+	assert.Equal(t, []byte{}, NormalizeEOL([]byte{}))
+
+	assert.Equal(t, []byte("mix\nand\nmatch\n."), NormalizeEOL([]byte("mix\r\nand\rmatch\n.")))
+}
+
+func Test_RandomInt(t *testing.T) {
+	int, err := RandomInt(255)
+	assert.True(t, int >= 0)
+	assert.True(t, int <= 255)
+	assert.NoError(t, err)
+}
+
+func Test_RandomString(t *testing.T) {
+	str1, err := RandomString(32)
+	assert.NoError(t, err)
+	matches, err := regexp.MatchString(`^[a-zA-Z0-9]{32}$`, str1)
+	assert.NoError(t, err)
+	assert.True(t, matches)
+
+	str2, err := RandomString(32)
+	assert.NoError(t, err)
+	matches, err = regexp.MatchString(`^[a-zA-Z0-9]{32}$`, str1)
+	assert.NoError(t, err)
+	assert.True(t, matches)
+
+	assert.NotEqual(t, str1, str2)
+
+	str3, err := RandomString(256)
+	assert.NoError(t, err)
+	matches, err = regexp.MatchString(`^[a-zA-Z0-9]{256}$`, str3)
+	assert.NoError(t, err)
+	assert.True(t, matches)
+
+	str4, err := RandomString(256)
+	assert.NoError(t, err)
+	matches, err = regexp.MatchString(`^[a-zA-Z0-9]{256}$`, str4)
+	assert.NoError(t, err)
+	assert.True(t, matches)
+
+	assert.NotEqual(t, str3, str4)
+}
+
+func Test_OptionalBool(t *testing.T) {
+	assert.Equal(t, OptionalBoolNone, OptionalBoolParse(""))
+	assert.Equal(t, OptionalBoolNone, OptionalBoolParse("x"))
+
+	assert.Equal(t, OptionalBoolFalse, OptionalBoolParse("0"))
+	assert.Equal(t, OptionalBoolFalse, OptionalBoolParse("f"))
+	assert.Equal(t, OptionalBoolFalse, OptionalBoolParse("False"))
+
+	assert.Equal(t, OptionalBoolTrue, OptionalBoolParse("1"))
+	assert.Equal(t, OptionalBoolTrue, OptionalBoolParse("t"))
+	assert.Equal(t, OptionalBoolTrue, OptionalBoolParse("True"))
 }

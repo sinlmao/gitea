@@ -5,9 +5,13 @@
 package repo
 
 import (
+	"net/http"
+
+	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/modules/context"
+	"code.gitea.io/gitea/modules/convert"
 	api "code.gitea.io/gitea/modules/structs"
-	"code.gitea.io/gitea/routers/api/v1/convert"
+	"code.gitea.io/gitea/routers/api/v1/utils"
 )
 
 // ListSubscribers list a repo's subscribers (i.e. watchers)
@@ -28,17 +32,28 @@ func ListSubscribers(ctx *context.APIContext) {
 	//   description: name of the repo
 	//   type: string
 	//   required: true
+	// - name: page
+	//   in: query
+	//   description: page number of results to return (1-based)
+	//   type: integer
+	// - name: limit
+	//   in: query
+	//   description: page size of results
+	//   type: integer
 	// responses:
 	//   "200":
 	//     "$ref": "#/responses/UserList"
-	subscribers, err := ctx.Repo.Repository.GetWatchers(0)
+
+	subscribers, err := repo_model.GetRepoWatchers(ctx.Repo.Repository.ID, utils.GetListOptions(ctx))
 	if err != nil {
-		ctx.Error(500, "GetWatchers", err)
+		ctx.Error(http.StatusInternalServerError, "GetRepoWatchers", err)
 		return
 	}
 	users := make([]*api.User, len(subscribers))
 	for i, subscriber := range subscribers {
-		users[i] = convert.ToUser(subscriber, ctx.IsSigned, ctx.User != nil && ctx.User.IsAdmin)
+		users[i] = convert.ToUser(subscriber, ctx.User)
 	}
-	ctx.JSON(200, users)
+
+	ctx.SetTotalCountHeader(int64(ctx.Repo.Repository.NumWatches))
+	ctx.JSON(http.StatusOK, users)
 }
